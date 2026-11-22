@@ -77,7 +77,7 @@ struct FileExplorerView: View {
     @State private var query = ""
 
     /// Directory tree built from the flat inventory.
-    private struct Node: Identifiable {
+    struct Node: Identifiable {
         let id: String
         let name: String
         let path: String
@@ -152,7 +152,14 @@ private struct TreeNodeView: View {
     let node: FileExplorerView.Node
     let outcome: AnalysisEngine.Outcome
     let depth: Int
-    @State private var expanded = depth < 1
+    @State private var expanded: Bool
+
+    init(node: FileExplorerView.Node, outcome: AnalysisEngine.Outcome, depth: Int) {
+        self.node = node
+        self.outcome = outcome
+        self.depth = depth
+        _expanded = State(initialValue: depth < 1)
+    }
 
     var body: some View {
         if let file = node.file {

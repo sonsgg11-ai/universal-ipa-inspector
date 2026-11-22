@@ -264,9 +264,9 @@ struct SwiftMetadataHomeView: View {
 
     var body: some View {
         List {
-            ForEach(Array(infos.keys.sorted()), id: \.self) { path in
-                guard let info = infos[path] else { return }
-                Section(path) {
+            ForEach(infos.sorted(by: { $0.key < $1.key }), id: \.key) { pair in
+                let info = pair.value
+                Section(pair.key) {
                     switch info.status {
                     case .blocked:
                         Label("Blocked by FairPlay encryption", systemImage: "lock.fill")
@@ -339,9 +339,9 @@ struct ObjCMetadataHomeView: View {
 
     var body: some View {
         List {
-            ForEach(Array(infos.keys.sorted()), id: \.self) { path in
-                guard let info = infos[path] else { return }
-                Section(path) {
+            ForEach(infos.sorted(by: { $0.key < $1.key }), id: \.key) { pair in
+                let info = pair.value
+                Section(pair.key) {
                     switch info.status {
                     case .blocked:
                         Label("Blocked by FairPlay encryption", systemImage: "lock.fill")

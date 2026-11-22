@@ -539,7 +539,8 @@ struct ReportsView: View {
         exportState = .working
         let csv = ReportExporter.exportFindingsCSV(report: outcome.report,
                                                    security: outcome.security)
-        finish(try? writeTemp(csv, name: "\(safeName)-findings.csv") ?? URL(fileURLWithPath: "/dev/null"), "CSV")
+        let csvURL = (try? writeTemp(csv, name: "\(safeName)-findings.csv")) ?? URL(fileURLWithPath: "/dev/null")
+        finish(csvURL, "CSV")
     }
 
     private func exportTXT() {
@@ -548,7 +549,8 @@ struct ReportsView: View {
                                            fairplay: outcome.fairplay,
                                            signing: outcome.signing,
                                            metadata: outcome.engineMetadata)
-        finish(try? writeTemp(Data(txt.utf8), name: "\(safeName)-summary.txt") ?? URL(fileURLWithPath: "/dev/null"), "TXT")
+        let txtURL = (try? writeTemp(Data(txt.utf8), name: "\(safeName)-summary.txt")) ?? URL(fileURLWithPath: "/dev/null")
+        finish(txtURL, "TXT")
     }
 
     private func exportPDF() {
@@ -557,7 +559,8 @@ struct ReportsView: View {
                                            secrets: outcome.secrets,
                                            metadata: outcome.engineMetadata,
                                            fairplay: outcome.fairplay)
-        finish(try? writeTemp(pdf, name: "\(safeName)-report.pdf") ?? URL(fileURLWithPath: "/dev/null"), "PDF")
+        let pdfURL = (try? writeTemp(pdf, name: "\(safeName)-report.pdf")) ?? URL(fileURLWithPath: "/dev/null")
+        finish(pdfURL, "PDF")
     }
 
     private func exportZIP() {
