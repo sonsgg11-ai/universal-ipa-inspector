@@ -26,7 +26,8 @@ jobs:
   #    report model and the diff. Fast, and they fail the build honestly.
   # ---------------------------------------------------------------------------
   logic-tests:
-    runs-on: ubuntu-latest
+    # Pinned to 24.04: the setup-swift action does not know the 26.04 image yet.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -93,7 +94,9 @@ jobs:
           CHOSEN=$(printf '%s\n' $CANDIDATES | sed 's#.*/Xcode##; s#\.app##' | paste -d' ' - <(printf '%s\n' $CANDIDATES) \
                    | sort -V | tail -1 | awk '{print $2}')
           echo "Chosen: $CHOSEN"
-          VERSION=$("$CHOSEN/Contents/Developer/usr/bin/xcodebuild" -version | head -1 | awk '{print $2}')
+          # Read the full version output: `head -1` closes the pipe early,
+          # which makes recent xcodebuild builds crash with SIGPIPE (exit 134).
+          VERSION=$("$CHOSEN/Contents/Developer/usr/bin/xcodebuild" -version | awk 'NR==1 {print $2}')
           echo "xcode_path=$CHOSEN" >> "$GITHUB_OUTPUT"
           echo "xcode_version=$VERSION" >> "$GITHUB_OUTPUT"
 
