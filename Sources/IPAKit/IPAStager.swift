@@ -12,7 +12,6 @@ enum IPAStager {
     enum StagingError: LocalizedError {
         case notEnoughStorage(needed: Int64, available: Int64)
         case sourceUnreadable(underlying: String)
-        case iCloudDownloadTimedOut(seconds: Int)
 
         var errorDescription: String? {
             switch self {
@@ -23,9 +22,7 @@ enum IPAStager {
                     + ByteCountFormatter.string(fromByteCount: available, countStyle: .file)
                     + " is free. Remove some files (or pick a smaller IPA) and try again."
             case .sourceUnreadable(let underlying):
-                return "Could not read the selected file: \(underlying). If it lives in iCloud Drive, open it once in the Files app so it downloads locally."
-            case .iCloudDownloadTimedOut(let seconds):
-                return "The file is in iCloud Drive and did not finish downloading within \(seconds) seconds. Open it once in the Files app (it will download), then import again."
+                return "Could not read the selected file: \(underlying). If it lives in iCloud Drive, this usually means the download could not complete — try again, or make sure the file is stored on this iPhone."
             }
         }
     }
@@ -126,58 +123,66 @@ enum IPAStager {
         }
     }
 
-    // MARK: iCloud materialisation (Darwin only — the resource keys do not
-    // exist in the Linux Foundation build)
+    // MARK: iCloud materialisation (Darwin only)
+    //
+    // iOS does not expose the per-item download-percent resource keys (they
+    // are macOS-only and deprecated on iOS in favour of NSMetadataQuery), so
+    // materialisation uses the documented NSFileCoordinator path instead:
+    // coordinating a read with `.forUploading` makes the file provider fetch
+    // the bytes and hands the accessor a URL that can actually be read.
 
     #if os(iOS) || os(macOS)
-    private static let iCloudDownloadTimeoutSeconds = 180
-
-    /// Returns the download progress (0…1) of a possibly-dataless iCloud item,
-    /// or nil when the file is not an iCloud item at all.
-    static func iCloudDownloadFraction(_ url: URL) -> Double? {
-        let values = try? url.resourceValues(forKeys: [
-            .isUbiquitousItemKey,
-            .ubiquitousItemDownloadingStatusKey,
-            .ubiquitousItemPercentDownloadedKey,
-        ])
-        guard values?.isUbiquitousItem == true else { return nil }
-        if values?.ubiquitousItemDownloadingStatus == .current { return 1 }
-        let percent = values?.ubiquitousItemPercentDownloaded ?? 0
-        return min(max(Double(percent) / 100, 0), 0.99)
+    /// True when the file already has readable bytes on disk (a quick probe
+    /// read of the first bytes). A dataless iCloud placeholder fails this.
+    static func hasLocalBytes(_ url: URL) -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        guard let head = try? handle.read(upToCount: 8) else { return false }
+        return !head.isEmpty
     }
 
     /// Makes sure a picked iCloud Drive file has real bytes on disk before the
-    /// copy starts. Triggers the download when needed and polls until it is
-    /// complete (or the bounded wait runs out — the failure then tells the
-    /// user exactly what to do).
+    /// copy starts. The coordinator blocks until the provider finishes the
+    /// download; progress is reported as 0 → 1 because iOS gives no percent
+    /// for a one-shot coordinated read.
     static func ensureDownloaded(_ url: URL,
                                  isCancelled: () -> Bool,
-                                 onFraction: (Double) -> Void = { _ in },
-                                 pollIntervalSeconds: UInt32 = 1) throws {
-        if iCloudDownloadFraction(url) == nil {
-            return // not an iCloud item: nothing to wait for
-        }
-        if iCloudDownloadFraction(url) == 1 { return }
+                                 onFraction: (Double) -> Void = { _ in }) throws {
+        if hasLocalBytes(url) { return } // local file: nothing to wait for
+        if isCancelled() { throw CancellationError() }
 
+        onFraction(0)
         try? FileManager.default.startDownloadingUbiquitousItem(at: url)
-        var waited = 0
-        while waited < iCloudDownloadTimeoutSeconds {
-            if isCancelled() { throw CancellationError() }
-            let fraction = iCloudDownloadFraction(url) ?? 0
-            onFraction(fraction)
-            if fraction == 1 { return }
-            sleep(pollIntervalSeconds)
-            waited += Int(pollIntervalSeconds)
+
+        var coordinatorError: NSError?
+        var readError: Error?
+        let coordinator = NSFileCoordinator(filePresenter: nil)
+        coordinator.coordinate(readingItemAt: url,
+                               options: [.forUploading],
+                               error: &coordinatorError) { coordinatedURL in
+            do {
+                let handle = try FileHandle(forReadingFrom: coordinatedURL)
+                _ = try handle.read(upToCount: 8)
+                try? handle.close()
+            } catch {
+                readError = error
+            }
         }
-        throw StagingError.iCloudDownloadTimedOut(seconds: iCloudDownloadTimeoutSeconds)
+        if let readError {
+            throw StagingError.sourceUnreadable(underlying: readError.localizedDescription)
+        }
+        if let coordinatorError {
+            throw StagingError.sourceUnreadable(underlying: coordinatorError.localizedDescription)
+        }
+        if isCancelled() { throw CancellationError() }
+        onFraction(1)
     }
     #else
     /// Linux builds have no iCloud: every file is already "downloaded".
     static func ensureDownloaded(_ url: URL,
                                  isCancelled: () -> Bool,
-                                 onFraction: (Double) -> Void = { _ in },
-                                 pollIntervalSeconds: UInt32 = 1) throws {
-        _ = url; _ = isCancelled; _ = onFraction; _ = pollIntervalSeconds
+                                 onFraction: (Double) -> Void = { _ in }) throws {
+        _ = url; _ = isCancelled; _ = onFraction
     }
     #endif
 
