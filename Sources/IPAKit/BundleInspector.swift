@@ -764,7 +764,7 @@ final class BundleInspector {
                 // Skip template placeholders and obvious noise.
                 if url.contains("%@") || url.contains("${") || url.contains("{{") { return }
                 counts[url, default: 0] += 1
-                if counts.count >= policy.maxURLs { stop.pointee = true }
+                if counts.count >= self.policy.maxURLs { stop.pointee = true }
             }
             if counts.count >= policy.maxURLs { break }
         }
