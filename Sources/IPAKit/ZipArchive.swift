@@ -1,5 +1,4 @@
 import Foundation
-import CryptoKit
 
 /// Reads a ZIP archive out of a file on disk.
 ///
@@ -49,7 +48,7 @@ enum ZipArchive {
     /// Largest central directory we will trust, and the largest single entry we
     /// will decompress. Both are policy limits, not ZIP limits.
     static let maxCentralDirectoryBytes = 64 * 1024 * 1024
-    static let maxEntryUncompressed = 8 * 1024 * 1024 * 1024        // 8 GiB
+    static let maxEntryUncompressed: Int64 = 8 * 1024 * 1024 * 1024        // 8 GiB
     static let maxTotalUncompressed: Int64 = 32 * 1024 * 1024 * 1024 // 32 GiB
     static let maxCompressionRatio: Int64 = 2000
 

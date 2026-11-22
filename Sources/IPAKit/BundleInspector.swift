@@ -418,7 +418,7 @@ final class BundleInspector {
             guard MachOParser.looksLikeMachO(head) else { continue }
 
             let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0
-            guard let data = size! <= Int64(policy.maxBinaryScanBytes) * 4
+            guard let data = size <= Int64(policy.maxBinaryScanBytes) * 4
                     ? try? Data(contentsOf: url, options: .alwaysMapped) : nil else {
                 report.findings.append(Finding(
                     category: "Binary", title: (file.path as NSString).lastPathComponent,
@@ -431,7 +431,7 @@ final class BundleInspector {
                 let archs = try MachOParser.parse(data, label: file.path)
                 guard !archs.isEmpty else { continue }
                 let binary = BinaryInfo(path: file.path, archs: archs,
-                                        warnings: archs.flatMap(\.warnings))
+                                        warnings: archs.flatMap { $0.warnings })
                 parsed[file.path] = binary
                 report.binaries.append(binary)
 
@@ -700,7 +700,7 @@ final class BundleInspector {
             }
             let url = extraction.root.appendingPathComponent(binary.path)
             let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0
-            if size ?? 0 > Int64(policy.maxBinaryScanBytes) { continue }
+            if size > Int64(policy.maxBinaryScanBytes) { continue }
             var scanner = StringScanner(url: url, maxBytes: policy.maxBinaryScanBytes)
             let strings = scanner.strings()
             if !strings.isEmpty {
