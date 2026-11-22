@@ -472,7 +472,7 @@ struct DependenciesView: View {
                     ForEach(structure.components) { component in
                         HStack {
                             VStack(alignment: .leading, spacing: 1) {
-                                Text(component.name).font(.footnote.weight(.semibold))
+                                Text(component.name ?? (component.path as NSString).lastPathComponent).font(.footnote.weight(.semibold))
                                 Text(component.kind.rawValue).font(.caption2).foregroundStyle(.secondary)
                             }
                             Spacer()

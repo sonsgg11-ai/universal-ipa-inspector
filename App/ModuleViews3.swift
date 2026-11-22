@@ -704,7 +704,7 @@ struct FindingsBrowserView: View {
                 }
                 Picker("Category", selection: $selectedCategory) {
                     Text("All").tag(String?.none)
-                    ForEach(report.categories, id: \.self) { category in
+                    ForEach(report.findings.categories, id: \.self) { category in
                         Text(category).tag(String?.some(category))
                     }
                 }
