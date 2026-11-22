@@ -333,7 +333,6 @@ jobs:
             --title "$TITLE" \
             --notes "Automated unsigned build of IPAInspector (run $RUN_ID).
           Asset: **unsigned-latest.ipa** — always the newest build at this URL.
-          SHA-256 recorded in the job log. Install by side-loading (this IPA is not signed; sign it yourself before installing on a device)." \
-            --clobber
+          SHA-256 recorded in the job log. Install by side-loading (this IPA is not signed; sign it yourself before installing on a device)."
           echo "--- release assets ---"
           gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[] | {name, size, url: .downloadUrl}'
