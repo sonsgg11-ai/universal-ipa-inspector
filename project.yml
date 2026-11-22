@@ -34,11 +34,34 @@ targets:
         ITSAppUsesNonExemptEncryption: false
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
+        # Declare the IPA package type so the app appears in the Files share
+        # sheet and in "Open in…" — without this the user cannot hand a 230 MB
+        # IPA to the app at all (long-press → Share shows no destination).
+        UTExportedTypeDeclarations:
+          - UTTypeIdentifier: com.yourname.ipainspector.ipa
+            UTTypeDescription: iOS App Package (IPA)
+            UTTypeConformsTo:
+              - public.data
+              - public.zip-archive
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - ipa
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: iOS App Package (IPA)
+            LSItemContentTypes:
+              - com.yourname.ipainspector.ipa
+              - com.pkware.zip-archive
+              - public.zip-archive
+            LSHandlerRank: Owner
+          - CFBundleTypeName: Archive
+            LSItemContentTypes:
+              - public.data
+            LSHandlerRank: Alternate
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.yourname.ipainspector
-        MARKETING_VERSION: 0.2.0
-        CURRENT_PROJECT_VERSION: 2
+        MARKETING_VERSION: 0.2.1
+        CURRENT_PROJECT_VERSION: 3
         SWIFT_VERSION: "5.9"
         TARGETED_DEVICE_FAMILY: "1"
         DEVELOPMENT_TEAM: ""

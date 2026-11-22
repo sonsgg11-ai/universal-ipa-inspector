@@ -624,8 +624,16 @@ struct ReportSummaryView: View {
             Section("Report") {
                 KeyValueRow(key: "Source", value: report.source)
                 KeyValueRow(key: "Name", value: report.name)
-                KeyValueRow(key: "Files", value: "\(report.fileCount)")
-                KeyValueRow(key: "Total size", value: ByteFormat.string(report.totalBytes))
+                if report.source == "App Store" {
+                    // A store listing has no local bytes to count. Show what
+                    // the store actually tells us instead of a meaningless
+                    // “Zero KB / 0 files” pair.
+                    KeyValueRow(key: "Download size", value: listingValue(for: "Download size"))
+                    KeyValueRow(key: "Files", value: "— (needs an imported IPA)")
+                } else {
+                    KeyValueRow(key: "Files", value: "\(report.fileCount)")
+                    KeyValueRow(key: "Total size", value: ByteFormat.string(report.totalBytes))
+                }
                 KeyValueRow(key: "Findings", value: "\(report.findings.count)")
                 if let hash = report.sha256 {
                     VStack(alignment: .leading, spacing: 2) {
@@ -658,13 +666,26 @@ struct ReportSummaryView: View {
                 if report.binaries.isEmpty == false {
                     NavigationLink("Mach-O binaries (\(report.binaries.count))") { BinaryListView(report: report) }
                 }
-                NavigationLink("Files (\(report.fileCount))") { FileInventoryListView(report: report) }
+                if report.source == "App Store" {
+                    NavigationLink("Files — import an IPA") { FileInventoryListView(report: report) }
+                } else {
+                    NavigationLink("Files (\(report.fileCount))") { FileInventoryListView(report: report) }
+                }
                 NavigationLink("URLs (\(report.urls.count))") { URLListView(report: report) }
                 NavigationLink("Hosts (\(report.domains.count))") { HostListView(report: report) }
                 NavigationLink("Evidence log") { LogView() }
             }
         }
         .navigationTitle("Summary")
+    }
+
+    /// Pulls a named verified finding out of a store listing (e.g. the
+    /// download size the lookup API already returns).
+    private func listingValue(for title: String) -> String {
+        if let finding = report.findings.first(where: { $0.title == title && $0.status == .verified }) {
+            return finding.value
+        }
+        return "—"
     }
 }
 

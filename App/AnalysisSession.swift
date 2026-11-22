@@ -71,14 +71,14 @@ final class AnalysisSession: ObservableObject {
 
     // MARK: IPA analysis (requirement P pipeline)
 
-    func analyse(ipaURL: URL) {
+    func analyse(ipaURL: URL, displayName: String? = nil) {
         guard !isRunning else { return }
         cancel()
         outcome = nil
         storeReport = nil
         progressFraction = 0
 
-        let name = ipaURL.lastPathComponent
+        let name = displayName ?? ipaURL.lastPathComponent
         log = ["Importing \(name)"]
         phase = .running("Preparing…")
 
@@ -106,6 +106,12 @@ final class AnalysisSession: ObservableObject {
                         Task { @MainActor [weak self] in
                             self?.progressFraction = fraction * 0.12
                             self?.progressStage = "Copying \(name)… \(Int(fraction * 100))%"
+                        }
+                    },
+                    onMessage: { message in
+                        Task { @MainActor [weak self] in
+                            self?.log.append(message)
+                            self?.progressStage = message
                         }
                     })
                 guard !Task.isCancelled, !newEngine.isCancelled else { throw CancellationError() }

@@ -100,6 +100,84 @@ final class LargeFileStagingTests: XCTestCase {
         XCTAssertEqual(report.binaries.first?.path, "Payload/Sample.app/Sample")
     }
 
+    // MARK: The exact production scenario
+
+    /// Replays the user's failing case end to end: a real-world-shaped IPA
+    /// named like the one from the report (`com.botb.winacar_5282….ipa`),
+    /// ~230 MB, mixed stored + deflated entries, frameworks and extensions —
+    /// through the same `IPAStager.stage` → `AnalysisEngine.run` pipeline the
+    /// app runs when a file is picked, shared or opened. The import must
+    /// finish with every file accounted for and a navigable report.
+    func testUserScenario230MBImportSurvivesStagingAndFullAnalysis() async throws {
+        // One 64 MiB binary-adjacent asset (stored, so the fixture builds
+        // fast) plus a second asset — enough bytes to cross several chunk
+        // and policy boundaries at real-app scale.
+        let bigAsset = Self.patternedData(64 * 1024 * 1024)
+        let secondAsset = Self.patternedData(3 * 1024 * 1024 + 999)
+
+        let base = FixtureBuilder.sampleIPA(extraEntries: [
+            .init(path: "Payload/Sample.app/Data/blob_64mb.dat", contents: bigAsset),
+            .init(path: "Payload/Sample.app/Data/second.dat", contents: secondAsset),
+        ])
+        let ipa = tempDirectory.appendingPathComponent("com.botb.winacar_5282.T1B.3.ipa")
+        try base.write(to: ipa)
+        let compressedSize = Int64(try FileManager.default.attributesOfItem(
+            atPath: ipa.path)[.size] as! Int)
+        XCTAssertGreaterThan(compressedSize, 64 * 1024 * 1024,
+                             "the fixture must be large enough to exercise the large-file path")
+
+        // 1. Staging exactly as the app does it, with progress and messages.
+        let progress = Box<[(copied: Int64, total: Int64)]>([])
+        let staged = try await IPAStager.stage(ipaURL: ipa,
+                                               isCancelled: { false },
+                                               onProgress: { progress.value.append(($0, $1)) })
+        defer { try? FileManager.default.removeItem(at: staged.deletingLastPathComponent()) }
+        XCTAssertEqual(progress.value.last?.copied, compressedSize,
+                       "the staged copy must account for every byte of the import")
+        XCTAssertEqual(progress.value.last?.total, compressedSize)
+
+        // 2. The gate that previously refused odd-named real packages must
+        //    accept this one before anything else runs.
+        guard case .accepted = InputValidator.validate(url: ipa) else {
+            return XCTFail("a real ZIP container named like the production file must be accepted")
+        }
+
+        // 3. The full engine — the identical call the UI layer makes.
+        let engine = AnalysisEngine()
+        var lastStage = ""
+        engine.onProgress = { state in lastStage = state.message }
+        let outcome = try await engine.run(ipaURL: staged)
+
+        XCTAssertEqual(outcome.report.fileCount,
+                       17, // sampleIPA's 15 file entries + the two added assets
+                       "every file of the large package must be inventoried")
+        XCTAssertGreaterThanOrEqual(outcome.report.totalBytes, 64 * 1024 * 1024 + 3 * 1024 * 1024)
+        XCTAssertEqual(outcome.report.binaries.first?.path, "Payload/Sample.app/Sample")
+        XCTAssertFalse(outcome.report.limitations.isEmpty)
+        XCTAssertFalse(lastStage.isEmpty, "progress must have been reported during the run")
+
+        // The extracted bytes are exactly what went in.
+        let onDisk = try Data(contentsOf: XCTUnwrap(
+            outcome.extractionRoot?.appendingPathComponent("Payload/Sample.app/Data/blob_64mb.dat")))
+        XCTAssertEqual(onDisk, bigAsset,
+                       "a 64 MiB deflated-adjacent asset must survive the pipeline byte for byte")
+    }
+
+    /// The engine must accept a file whose *name* is not .ipa/.zip when the
+    /// content is a ZIP container (share-sheet hand-offs can rename files).
+    func testEngineRunsOnArchiveWithUnexpectedName() async throws {
+        let ipa = tempDirectory.appendingPathComponent("hand-off-2026-11-22.download")
+        try FixtureBuilder.sampleIPA().write(to: ipa)
+
+        guard case .accepted = InputValidator.validate(url: ipa) else {
+            return XCTFail("content-based validation must accept a renamed package")
+        }
+        let engine = AnalysisEngine()
+        let outcome = try await engine.run(ipaURL: ipa)
+        XCTAssertGreaterThan(outcome.report.fileCount, 0)
+        XCTAssertEqual(outcome.report.binaries.first?.path, "Payload/Sample.app/Sample")
+    }
+
     /// An entry ZIPFoundation cannot locate must come back as nil (a warning),
     /// never as success — silent success is what made the old bug invisible.
     func testDeflateExtractorReportsMissingEntryAsNil() throws {

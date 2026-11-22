@@ -12,6 +12,7 @@ enum IPAStager {
     enum StagingError: LocalizedError {
         case notEnoughStorage(needed: Int64, available: Int64)
         case sourceUnreadable(underlying: String)
+        case iCloudDownloadTimedOut(seconds: Int)
 
         var errorDescription: String? {
             switch self {
@@ -23,6 +24,8 @@ enum IPAStager {
                     + " is free. Remove some files (or pick a smaller IPA) and try again."
             case .sourceUnreadable(let underlying):
                 return "Could not read the selected file: \(underlying). If it lives in iCloud Drive, open it once in the Files app so it downloads locally."
+            case .iCloudDownloadTimedOut(let seconds):
+                return "The file is in iCloud Drive and did not finish downloading within \(seconds) seconds. Open it once in the Files app (it will download), then import again."
             }
         }
     }
@@ -74,7 +77,8 @@ enum IPAStager {
     /// responsible for removing the parent directory when done.
     static func stage(ipaURL: URL,
                       isCancelled: @escaping @Sendable () -> Bool,
-                      onProgress: @escaping @Sendable (_ copied: Int64, _ total: Int64) -> Void) async throws -> URL {
+                      onProgress: @escaping @Sendable (_ copied: Int64, _ total: Int64) -> Void,
+                      onMessage: @escaping @Sendable (String) -> Void = { _ in }) async throws -> URL {
         try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 // Security scope is a Darwin concept; Linux tests exercise the
@@ -84,6 +88,15 @@ enum IPAStager {
                 defer { if accessed { ipaURL.stopAccessingSecurityScopedResource() } }
                 #endif
                 do {
+                    // A file picked straight out of iCloud Drive can be a
+                    // placeholder with no bytes on disk. Make sure it is
+                    // materialised before opening it, with live progress.
+                    try IPAStager.ensureDownloaded(ipaURL,
+                                                   isCancelled: isCancelled,
+                                                   onFraction: { fraction in
+                                                       onMessage("Downloading from iCloud… \(Int(fraction * 100))%")
+                                                   })
+
                     let attributes = try FileManager.default.attributesOfItem(atPath: ipaURL.path)
                     guard let compressedSize = (attributes[.size] as? NSNumber)?.int64Value, compressedSize > 0 else {
                         throw StagingError.sourceUnreadable(underlying: "the file has no readable size")
@@ -112,6 +125,61 @@ enum IPAStager {
             }
         }
     }
+
+    // MARK: iCloud materialisation (Darwin only — the resource keys do not
+    // exist in the Linux Foundation build)
+
+    #if os(iOS) || os(macOS)
+    private static let iCloudDownloadTimeoutSeconds = 180
+
+    /// Returns the download progress (0…1) of a possibly-dataless iCloud item,
+    /// or nil when the file is not an iCloud item at all.
+    static func iCloudDownloadFraction(_ url: URL) -> Double? {
+        let values = try? url.resourceValues(forKeys: [
+            .isUbiquitousItemKey,
+            .ubiquitousItemDownloadingStatusKey,
+            .ubiquitousItemPercentDownloadedKey,
+        ])
+        guard values?.isUbiquitousItem == true else { return nil }
+        if values?.ubiquitousItemDownloadingStatus == .current { return 1 }
+        let percent = values?.ubiquitousItemPercentDownloaded ?? 0
+        return min(max(Double(percent) / 100, 0), 0.99)
+    }
+
+    /// Makes sure a picked iCloud Drive file has real bytes on disk before the
+    /// copy starts. Triggers the download when needed and polls until it is
+    /// complete (or the bounded wait runs out — the failure then tells the
+    /// user exactly what to do).
+    static func ensureDownloaded(_ url: URL,
+                                 isCancelled: () -> Bool,
+                                 onFraction: (Double) -> Void = { _ in },
+                                 pollIntervalSeconds: UInt32 = 1) throws {
+        if iCloudDownloadFraction(url) == nil {
+            return // not an iCloud item: nothing to wait for
+        }
+        if iCloudDownloadFraction(url) == 1 { return }
+
+        try? FileManager.default.startDownloadingUbiquitousItem(at: url)
+        var waited = 0
+        while waited < iCloudDownloadTimeoutSeconds {
+            if isCancelled() { throw CancellationError() }
+            let fraction = iCloudDownloadFraction(url) ?? 0
+            onFraction(fraction)
+            if fraction == 1 { return }
+            sleep(pollIntervalSeconds)
+            waited += Int(pollIntervalSeconds)
+        }
+        throw StagingError.iCloudDownloadTimedOut(seconds: iCloudDownloadTimeoutSeconds)
+    }
+    #else
+    /// Linux builds have no iCloud: every file is already "downloaded".
+    static func ensureDownloaded(_ url: URL,
+                                 isCancelled: () -> Bool,
+                                 onFraction: (Double) -> Void = { _ in },
+                                 pollIntervalSeconds: UInt32 = 1) throws {
+        _ = url; _ = isCancelled; _ = onFraction; _ = pollIntervalSeconds
+    }
+    #endif
 
     /// Chunked copy with progress. Never loads more than one chunk into
     /// memory, whatever the file size.

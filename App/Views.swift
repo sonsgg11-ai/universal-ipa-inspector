@@ -14,13 +14,27 @@ struct IPAInspectorApp: App {
 
 struct RootView: View {
     @StateObject private var session = AnalysisSession()
+    @State private var openError: String?
 
     var body: some View {
         NavigationStack {
             if session.outcome != nil {
                 ModuleHomeView()
             } else {
-                InputView()
+                InputView(externalError: openError)
+            }
+        }
+        // Files → Share → “IPA Inspector”, “Open in IPA Inspector”, and
+        // AirDrop all arrive here. Without this handler the share sheet may
+        // list the app but handing a file over did nothing — which is exactly
+        // how a 230 MB IPA “never loads into the app”.
+        .onOpenURL { url in
+            openError = nil
+            switch InputValidator.validate(url: url) {
+            case .accepted(let name):
+                session.analyse(ipaURL: url, displayName: name)
+            case .rejected(let message):
+                openError = message
             }
         }
         .environmentObject(session)
@@ -31,10 +45,22 @@ struct RootView: View {
 // MARK: - Input screen (App Store lookup + IPA import)
 
 struct InputView: View {
+    var externalError: String? = nil
     @EnvironmentObject private var session: AnalysisSession
     @State private var link = ""
     @State private var importing = false
     @State private var importError: String?
+    /// Declared in project.yml as UTExportedTypeDeclarations; resolving it by
+    /// identifier keeps the picker and the document types in sync.
+    private let ipaType = UTType("com.yourname.ipainspector.ipa")
+    /// The widest possible net: our declared IPA type, the system ZIP types,
+    /// and finally .item so nothing in the picker is ever greyed out.
+    private var importTypes: [UTType] {
+        var types: [UTType] = []
+        if let ipaType { types.append(ipaType) }
+        types.append(contentsOf: [.zip, .data, .archive, .item])
+        return types
+    }
 
     var body: some View {
         ScrollView {
@@ -84,6 +110,26 @@ struct InputView: View {
                             }
                             .font(.footnote)
                         }
+                    } else {
+                        Text("Supports packages of 1 GB and more. Copying and analysis run in the background with live progress — the file is never loaded into memory in one piece.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if !session.log.isEmpty {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Activity")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            ForEach(session.log.suffix(4), id: \.self) { line in
+                                Text(line)
+                                    .font(.caption2.monospaced())
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityElement(children: .combine)
                     }
                 }
 
@@ -96,6 +142,9 @@ struct InputView: View {
                 if let importError {
                     errorCard("Import", importError)
                 }
+                if let externalError {
+                    errorCard("Import", externalError)
+                }
 
                 if let report = session.activeReport {
                     ModuleCard(title: "Results", systemImage: "list.bullet.clipboard") {
@@ -104,7 +153,7 @@ struct InputView: View {
                         } label: {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(report.name).font(.headline)
-                                Text("\(report.findings.count) findings · \(report.fileCount) files")
+                                Text(resultSubtitle(report))
                                     .font(.caption).foregroundStyle(.secondary)
                             }
                         }
@@ -123,23 +172,32 @@ struct InputView: View {
         .navigationTitle("IPA Inspector")
         .fileImporter(
             isPresented: $importing,
-            allowedContentTypes: [.item, .data, .archive],
+            allowedContentTypes: importTypes,
             allowsMultipleSelection: false
         ) { result in
             importError = nil
             switch result {
             case .success(let urls):
                 guard let url = urls.first else { return }
-                let ext = url.pathExtension.lowercased()
-                guard ext == "ipa" || ext == "zip" else {
-                    importError = "Choose an .ipa (or .zip) file. Selected: \(url.lastPathComponent)"
-                    return
+                // Content-based validation: a real ZIP container is accepted
+                // whatever its name, so nothing importable is refused here.
+                switch InputValidator.validate(url: url) {
+                case .accepted(let name):
+                    session.analyse(ipaURL: url, displayName: name)
+                case .rejected(let message):
+                    importError = message
                 }
-                session.analyse(ipaURL: url)
             case .failure(let error):
                 importError = error.localizedDescription
             }
         }
+    }
+
+    private func resultSubtitle(_ report: Report) -> String {
+        if report.source == "App Store" {
+            return "\(report.findings.count) listing details · import an IPA for binary analysis"
+        }
+        return "\(report.findings.count) findings · \(report.fileCount) files"
     }
 
     private var hero: some View {
