@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(ZIPFoundation)
+import ZIPFoundation
+#endif
 
 /// Streams deflated ZIP entries to disk through ZIPFoundation.
 ///

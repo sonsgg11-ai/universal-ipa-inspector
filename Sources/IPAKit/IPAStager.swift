@@ -77,8 +77,12 @@ enum IPAStager {
                       onProgress: @escaping @Sendable (_ copied: Int64, _ total: Int64) -> Void) async throws -> URL {
         try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
+                // Security scope is a Darwin concept; Linux tests exercise the
+                // same copy logic without it.
+                #if os(iOS) || os(macOS)
                 let accessed = ipaURL.startAccessingSecurityScopedResource()
                 defer { if accessed { ipaURL.stopAccessingSecurityScopedResource() } }
+                #endif
                 do {
                     let attributes = try FileManager.default.attributesOfItem(atPath: ipaURL.path)
                     guard let compressedSize = (attributes[.size] as? NSNumber)?.int64Value, compressedSize > 0 else {
