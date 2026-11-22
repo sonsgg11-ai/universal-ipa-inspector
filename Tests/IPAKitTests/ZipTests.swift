@@ -117,11 +117,11 @@ final class ZipTests: XCTestCase {
     }
 
     func testZipBombRatioIsRejected() {
-        // 1 KiB compressed claiming 1 GiB uncompressed.
+        // 1 byte compressed claiming 1 GiB uncompressed.
         let plan = ZipArchive.buildPlan([
             .init(path: "bomb", contents: Data(), compressionMethod: 8,
                   localHeaderOffset: 0, isSymlink: false, isDirectory: false,
-                  compressedSize: 1024, uncompressedSize: Int64(1024 * 1024 * 1024),
+                  compressedSize: 1024, uncompressedSize: Int64(1024) * 1024 * 1024,
                   unixMode: nil),
         ])
         XCTAssertTrue(plan.accepted.isEmpty)

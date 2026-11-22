@@ -153,14 +153,10 @@ enum MachOParser {
         guard count > 0, count <= 64 else {
             throw MachOError.malformed("FAT architecture count \(count) is implausible")
         }
-        // A Java .class file shares the FAT magic and carries a version count
-        // (52 for modern classes) with no slice table behind it. The table
-        // must fit the file, so an implausible count is malformed, not merely
-        // truncated.
         guard r.fits(8, count * entrySize) else {
-            throw MachOError.malformed(
-                "FAT header claims \(count) architectures (\(count * entrySize) bytes of entries) " +
-                "but the file is only \(max(0, r.count - 8)) bytes past the header")
+            // A real FAT table always fits; a claim that does not fit means
+            // this is not a FAT binary (e.g. a Java class file).
+            throw MachOError.malformed("FAT table claims \(count) entries but the file is too short")
         }
 
         var archs: [ArchInfo] = []
@@ -185,11 +181,16 @@ enum MachOParser {
                 continue
             }
             var arch = try parseThin(r, offset: offset, size: size)
+            let sliceSubtype = arch.cpuSubtypeRaw
             arch.cpuTypeRaw = cpuType
             arch.cpuSubtypeRaw = cpuSubtype
-            // The FAT entry is authoritative for the architecture name: it is
-            // what Apple's tools record, and the slice header may disagree.
-            arch.cpu = MachO.cpuName(type: cpuType, subtype: cpuSubtype)
+            if arch.cpu == "unknown" || arch.cpu.hasPrefix("cpu type") {
+                arch.cpu = MachO.cpuName(type: cpuType, subtype: cpuSubtype)
+            } else if sliceSubtype == 0 && cpuSubtype != 0 {
+                // The slice header did not carry a specific subtype; the FAT
+                // entry's is authoritative (arm64 vs arm64e).
+                arch.cpu = MachO.cpuName(type: cpuType, subtype: cpuSubtype)
+            }
             archs.append(arch)
         }
         return archs
@@ -265,10 +266,8 @@ enum MachOParser {
                 arch.warnings.append("load command \(index) has an invalid size (\(cmdSize))")
                 break
             }
-            // The switch matches on the raw command value: the LC_REQ_DYLD bit
-            // is part of the weak/re-export command identities.
             let body = cursor
-            let cmd = rawCmd
+            let cmd = rawCmd & ~MachO.reqDyld == rawCmd ? rawCmd : rawCmd // keep raw; switch below handles flags
 
             switch cmd {
             case MachO.LoadCommand.segment64.rawValue, MachO.LoadCommand.segment32.rawValue:
@@ -284,9 +283,16 @@ enum MachOParser {
                 }
 
             case MachO.LoadCommand.encryptionInfo.rawValue, MachO.LoadCommand.encryptionInfo64.rawValue:
-                if let cryptID = d.u32(body + 16, bigEndian: big) {
+                // struct encryption_info_command(_64): cmd, cmdsize, cryptoff,
+                // cryptsize, cryptid [, pad]. Reading the full range lets the
+                // report state which bytes are scrambled, not just that they are.
+                if let cryptOff = d.u32(body + 8, bigEndian: big),
+                   let cryptSize = d.u32(body + 12, bigEndian: big),
+                   let cryptID = d.u32(body + 16, bigEndian: big) {
                     arch.cryptID = cryptID
                     arch.encrypted = cryptID != 0
+                    arch.cryptOffset = UInt64(cryptOff)
+                    arch.cryptSize = UInt64(cryptSize)
                 }
 
             case MachO.LoadCommand.buildVersion.rawValue:
@@ -401,6 +407,160 @@ enum MachOParser {
         guard hex.count == 32 else { return hex }
         func slice(_ a: Int, _ b: Int) -> Substring { hex[hex.index(hex.startIndex, offsetBy: a)..<hex.index(hex.startIndex, offsetBy: b)] }
         return "\(slice(0,8))-\(slice(8,12))-\(slice(12,16))-\(slice(16,20))-\(slice(20,32))"
+    }
+    // MARK: Symbol table
+
+    /// Maximum symbol count we will parse from one image.
+    static let maxSymbolsPerImage = 200_000
+
+    /// Parses LC_SYMTAB for the first readable thin slice in `data`.
+    ///
+    /// This is a separate, opt-in pass: the structure parser stays fast, and
+    /// symbol extraction can be cached per file. All reads are bounds-checked;
+    /// malformed tables return what was readable plus warnings, not a crash.
+    static func parseSymbols(_ data: Data, label: String = "binary") -> (symbols: [SymbolEntry], warnings: [String]) {
+        var warnings: [String] = []
+        let r = ByteReader(data, label: label)
+
+        var slice = data
+        if let beMagic = r.u32(0, bigEndian: true), beMagic == MachO.fatMagic || beMagic == MachO.fat64Magic {
+            let is64 = beMagic == MachO.fat64Magic
+            guard let rawCount = r.u32(4, bigEndian: true) else {
+                return ([], ["FAT header unreadable"])
+            }
+            let entrySize = is64 ? 32 : 20
+            let count = Int(min(rawCount, 64))
+            guard r.fits(8, count * entrySize) else {
+                return ([], ["FAT table truncated"])
+            }
+            var found: Data?
+            for i in 0..<count {
+                let base = 8 + i * entrySize
+                let width = is64 ? 8 : 4
+                guard let offset = r.uint(base + 8, size: width, bigEndian: true),
+                      let size = r.uint(base + 8 + width, size: width, bigEndian: true) else { continue }
+                if offset >= 0, size > 0, offset <= UInt64(data.count), size <= UInt64(data.count) - offset,
+                   let sub = r.subdata(Int(offset), Int(size)) {
+                    found = sub
+                    break
+                }
+            }
+            guard let first = found else {
+                return ([], ["no readable FAT slice"])
+            }
+            slice = first
+        }
+
+        let d = ByteReader(slice, label: label)
+        guard let magic = d.u32(0, bigEndian: false) else {
+            return ([], ["slice too short"])
+        }
+        let is64: Bool
+        let big: Bool
+        switch magic {
+        case MachO.magic64: is64 = true; big = false
+        case MachO.magic32: is64 = false; big = false
+        case MachO.magic64Swapped: is64 = true; big = true
+        case MachO.magic32Swapped: is64 = false; big = true
+        default:
+            return ([], ["not a Mach-O slice"])
+        }
+        guard let ncmds = d.u32(16, bigEndian: big),
+              let sizeofcmds = d.u32(20, bigEndian: big) else {
+            return ([], ["header truncated"])
+        }
+        let headerSize = is64 ? 32 : 28
+        guard d.fits(headerSize, Int(sizeofcmds)) else {
+            return ([], ["command table truncated"])
+        }
+
+        var cursor = headerSize
+        let limit = headerSize + Int(sizeofcmds)
+        for _ in 0..<min(Int(ncmds), 4096) {
+            guard cursor + 8 <= limit else { break }
+            guard let cmd = d.u32(cursor, bigEndian: big),
+                  let cmdSizeRaw = d.u32(cursor + 4, bigEndian: big) else { break }
+            let cmdSize = Int(cmdSizeRaw)
+            guard cmdSize >= 8, cursor + cmdSize <= limit else { break }
+
+            if cmd == MachO.LoadCommand.symtab.rawValue {
+                // struct symtab_command { cmd, cmdsize, symoff, nsyms, stroff, strsize }
+                guard let symoffRaw = d.u32(cursor + 8, bigEndian: big),
+                      let nsymsRaw = d.u32(cursor + 12, bigEndian: big),
+                      let stroffRaw = d.u32(cursor + 16, bigEndian: big),
+                      let strsizeRaw = d.u32(cursor + 20, bigEndian: big) else {
+                    warnings.append("symtab command is truncated")
+                    return ([], warnings)
+                }
+                let symoff = Int(symoffRaw)
+                let nsyms = Int(nsymsRaw)
+                let stroff = Int(stroffRaw)
+                let strsize = Int(strsizeRaw)
+                let entrySize = is64 ? 16 : 12
+
+                guard nsyms <= MachOParser.maxSymbolsPerImage else {
+                    warnings.append("symbol count \(nsyms) exceeds the parse limit")
+                    return ([], warnings)
+                }
+                guard stroff >= 0, stroff <= slice.count else {
+                    warnings.append("string table points outside the file")
+                    return ([], warnings)
+                }
+                guard symoff >= 0, d.fits(symoff, nsyms * entrySize) else {
+                    warnings.append("symbol table points outside the file")
+                    return ([], warnings)
+                }
+
+                var symbols: [SymbolEntry] = []
+                symbols.reserveCapacity(min(nsyms, 50_000))
+                for i in 0..<nsyms {
+                    let base = symoff + i * entrySize
+                    guard let strx = d.u32(base, bigEndian: big),
+                          let ntype = d.u8(base + 4),
+                          let nsect = d.u8(base + 5) else { break }
+                    let value: UInt64
+                    if is64 {
+                        value = d.u64(base + 8, bigEndian: big) ?? 0
+                    } else {
+                        value = d.u32(base + 8, bigEndian: big).map { UInt64($0) } ?? 0
+                    }
+                    let isExternal = (ntype & 0x01) != 0
+                    let typeBits = ntype & 0x0E
+                    let isUndefined = (typeBits == 0 && nsect == 0)
+                    let strBase = stroff + Int(strx)
+                    var name = ""
+                    if strBase < slice.count {
+                        name = d.cString(strBase, limit: 4096) ?? ""
+                    }
+                    if name.isEmpty { continue }
+                    symbols.append(SymbolEntry(name: name, isExternal: isExternal,
+                                               isUndefined: isUndefined,
+                                               section: nsect, value: value))
+                }
+                return (symbols, warnings)
+            }
+            cursor += cmdSize
+        }
+        return ([], warnings)
+    }
+
+    /// Raw bytes of a named section in a named segment of the first slice.
+    static func sectionData(_ data: Data, segment: String, section: String) -> Data? {
+        guard let archs = try? parse(data) else { return nil }
+        guard let arch = archs.first(where: { arch in
+            arch.segments.contains { seg in
+                seg.name == segment && seg.sections.contains { $0.name == section }
+            }
+        }) else { return nil }
+        for seg in arch.segments where seg.name == segment {
+            for sec in seg.sections where sec.name == section {
+                let end = UInt64(data.count)
+                guard sec.offset < end, UInt64(sec.offset) + sec.size <= end else { return nil }
+                return ByteReader(data, label: "sections")
+                    .subdata(Int(sec.offset), Int(min(sec.size, UInt64(Int.max))))
+            }
+        }
+        return nil
     }
 }
 

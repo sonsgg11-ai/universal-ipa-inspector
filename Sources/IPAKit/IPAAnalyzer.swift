@@ -1,19 +1,5 @@
 import Foundation
 
-// SHA-256: CryptoKit on Apple platforms, swift-crypto's Crypto module on Linux.
-#if canImport(CryptoKit)
-import CryptoKit
-#else
-import Crypto
-#endif
-
-// ZIPFoundation is available in the iOS app target, where it provides a
-// streaming deflate path. The Linux test package does not depend on it, and
-// every test fixture uses stored entries, so the pure-Swift reader suffices.
-#if canImport(ZIPFoundation)
-import ZIPFoundation
-#endif
-
 /// Which artefact a file inside the IPA belongs to.
 enum BundleRole: String, Codable {
     case mainApp = "main app"
@@ -99,11 +85,7 @@ final class IPAAnalyzer {
         let workRoot = fileManager.temporaryDirectory
             .appendingPathComponent("IPAInspector-\(UUID().uuidString)", isDirectory: true)
         try fileManager.createDirectory(at: workRoot, withIntermediateDirectories: true)
-        // The report holds no references into this directory: every reading
-        // pass finishes inside analyze. Removing it here covers both the
-        // success and the failure path, so a failed run can never leak a
-        // working tree into the app's temporary storage.
-        defer { cleanUp(workRoot) }
+        onWorkRootCreated?(workRoot)
 
         var analysis = Report(source: "IPA", name: ipaURL.lastPathComponent)
         var extraction: ExtractionResult?
@@ -121,7 +103,7 @@ final class IPAAnalyzer {
             let size = (try? fileManager.attributesOfItem(atPath: ipaURL.path)[.size] as? Int64) ?? 0
             analysis.findings.append(Finding(
                 category: "Archive", title: "IPA size on disk",
-                value: ByteCountFormatter.string(fromByteCount: size ?? 0, countStyle: .file),
+                value: ByteCountFormatter.string(fromByteCount: size, countStyle: .file),
                 source: ipaURL.lastPathComponent, status: .verified))
 
             progress("Reading archive directory…")
@@ -180,17 +162,31 @@ final class IPAAnalyzer {
                                     progress: progress, isCancelled: isCancelled)
 
             analysis.limitations.append(contentsOf: standardLimitations)
+            currentWorkRoot = workRoot
             return analysis
 
         } catch {
+            // A failed run must not leave analysis directories behind.
+            cleanUp(workRoot)
+            currentWorkRoot = nil
             throw error
         }
     }
+
+    /// The working directory of the most recent successful run, kept on disk
+    /// so the file explorer can serve previews without re-extracting.
+    public private(set) var currentWorkRoot: URL?
+
+    /// Optional observer for the working-directory creation. Lets callers
+    /// (and tests) track exactly which directory this analyzer created, so
+    /// cleanup can be verified without inspecting the shared temp folder.
+    var onWorkRootCreated: ((URL) -> Void)?
 
     /// Removes the working directory. Safe to call repeatedly.
     func cleanUp(_ root: URL?) {
         guard let root else { return }
         try? fileManager.removeItem(at: root)
+        if root == currentWorkRoot { currentWorkRoot = nil }
     }
 
     private func checkCancellation(_ isCancelled: () -> Bool) throws {
@@ -384,7 +380,31 @@ enum IPAAnalyzerError: LocalizedError, CustomStringConvertible {
         }
     }
 
-    /// Interpolation of an error should show the human message, not the enum
-    /// case name.
-    var description: String { localizedDescription }
+    var description: String { errorDescription ?? String(describing: self) }
 }
+
+#if canImport(CryptoKit)
+import CryptoKit
+#elseif canImport(Crypto)
+import Crypto
+#endif
+#if canImport(ZIPFoundation)
+import ZIPFoundation
+#endif
+// MARK: - File hashing
+
+/// Streaming SHA-256 used for the IPA and individual files. The hash runs in
+/// fixed-size chunks, so peak memory does not depend on file size.
+enum FileHasher {
+    static func sha256(of url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while true {
+            guard let chunk = try handle.read(upToCount: 4 * 1024 * 1024), !chunk.isEmpty else { break }
+            hasher.update(data: chunk)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+}
+

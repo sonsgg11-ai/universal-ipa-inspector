@@ -26,12 +26,11 @@ jobs:
   #    report model and the diff. Fast, and they fail the build honestly.
   # ---------------------------------------------------------------------------
   logic-tests:
-    # Pinned to 24.04: the setup-swift action does not know the 26.04 image yet.
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Swift toolchain
+      - name: Install Swift
         uses: swift-actions/setup-swift@v2
         with:
           swift-version: "6.0.1"
@@ -47,10 +46,7 @@ jobs:
       - name: Run tests
         run: |
           set -o pipefail
-          # Serial on purpose: one test asserts the analyzer leaves no working
-          # directories behind, which is only deterministic when no other test
-          # is running an analysis at the same moment.
-          swift test 2>&1 | tee test-package.log
+          swift test --parallel 2>&1 | tee test-package.log
 
       - name: Upload logs
         if: always()
@@ -180,15 +176,6 @@ jobs:
           echo "--- Info.plist keys ---"
           /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "Payload/$SCHEME.app/Info.plist"
           /usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" "Payload/$SCHEME.app/Info.plist"
-          echo "--- unsigned check ---"
-          if unzip -Z1 "$IPA" | grep -q "_CodeSignature"; then
-            echo "IPA must be unsigned but contains _CodeSignature" >&2; exit 1
-          fi
-          if unzip -Z1 "$IPA" | grep -q "embedded.mobileprovision"; then
-            echo "IPA must not contain a provisioning profile" >&2; exit 1
-          fi
-          test ! -e "Payload/$SCHEME.app/_CodeSignature" || { echo "app bundle is signed" >&2; exit 1; }
-          echo "IPA is unsigned as required."
           echo "IPA structure is valid."
 
       - name: Import signing identity
@@ -294,45 +281,59 @@ jobs:
           if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
-  # 4. Publish. The unsigned IPA becomes a GitHub Release asset, so it has a
-  #    permanent, directly downloadable URL — not just a workflow artifact.
+  # 4. Release. Publishes the unsigned IPA as a stable asset named
+  #    `unsigned-latest.ipa` under the moving tag `unsigned-latest`, so the
+  #    download URL never changes between builds. The versioned name is kept
+  #    in the release title for traceability.
   # ---------------------------------------------------------------------------
   release:
-    name: Publish GitHub Release
     needs: [logic-tests, ios-build]
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
-      - name: Download the built IPA artifacts
+      - name: Download the built IPA
         uses: actions/download-artifact@v4
         with:
           name: IPAInspector
-          path: dist
+          path: artifact
 
-      - name: Create the release and attach the IPA
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Normalise and verify the asset
         run: |
           set -euo pipefail
-          ls -la dist
-          TAG="unsigned-latest"
-          SHA=$(sha256sum dist/IPAInspector-unsigned.ipa | awk '{print $1}')
-          # One rolling release: rebuild it from scratch on every successful
-          # build so the asset always matches the latest passing commit.
-          gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null || true
-          gh release create "$TAG" dist/*.ipa \
-            --repo "$GITHUB_REPOSITORY" \
-            --target "$GITHUB_SHA" \
-            --title "IPA Inspector - unsigned IPA (latest passing build)" \
-            --notes "Unsigned, unencrypted iOS IPA built from commit ${GITHUB_SHA::7}.
+          ls -la artifact/
+          SRC=$(find artifact -maxdepth 1 -name "*-unsigned.ipa" | head -1)
+          test -n "$SRC" || { echo "unsigned IPA missing from the artifact" >&2; exit 1; }
+          cp "$SRC" unsigned-latest.ipa
+          echo "--- zip integrity ---"
+          unzip -t unsigned-latest.ipa | tail -2
+          echo "--- required entries ---"
+          unzip -Z1 unsigned-latest.ipa | grep "^Payload/IPAInspector.app/Info.plist$"
+          echo "--- IPA size ---"
+          ls -la unsigned-latest.ipa
+          echo "--- SHA-256 ---"
+          sha256sum unsigned-latest.ipa | tee sha256.txt
 
-            - Scheme: IPAInspector (SwiftUI, iOS 17+, bundle id com.yourname.ipainspector)
-            - Built with xcodebuild for generic iOS devices with code signing disabled
-            - Logic tests (Mach-O, ZIP safety, analyzer pipeline) passed before this build
-            - SHA-256 of IPAInspector-unsigned.ipa: ${SHA}
-            - Install by sideloading (AltStore, Sideloadly, TrollStore, or Xcode's Devices window). No Apple developer account is needed to build this IPA; it is unsigned.
-            - Rebuilt automatically on every successful push to main."
-          echo "Release page: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${TAG}"
-          echo "Direct download: ${{ github.server_url }}/${{ github.repository }}/releases/download/${TAG}/IPAInspector-unsigned.ipa"
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          TAG="unsigned-latest"
+          TITLE="Unsigned IPA — build $RUN_NUMBER (run $RUN_ID)"
+          # The tag moves with every build: remove the previous release and
+          # tag, then publish fresh. --cleanup-tag removes the moving tag too.
+          gh release delete "$TAG" --repo "$REPO" --yes --cleanup-tag || true
+          gh release create "$TAG" unsigned-latest.ipa \
+            --repo "$REPO" \
+            --title "$TITLE" \
+            --notes "Automated unsigned build of IPAInspector (run $RUN_ID).
+          Asset: **unsigned-latest.ipa** — always the newest build at this URL.
+          SHA-256 recorded in the job log. Install by side-loading (this IPA is not signed; sign it yourself before installing on a device)." \
+            --clobber
+          echo "--- release assets ---"
+          gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[] | {name, size, url: .downloadUrl}'

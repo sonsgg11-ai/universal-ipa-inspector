@@ -5,8 +5,6 @@ import XCTest
 ///
 /// These prove the analyzer pipeline works on a real archive: hashing,
 /// extraction, plist reading, Mach-O parsing, redaction and report assembly.
-/// The tests drive the analyzer directly from worker queues (no UI, no main
-/// actor), which keeps them portable across Apple and Linux test runners.
 final class AnalyzerPipelineTests: XCTestCase {
 
     private var tempDirectory: URL!
@@ -194,16 +192,21 @@ final class AnalyzerPipelineTests: XCTestCase {
     }
 
     func testTemporaryDirectoriesAreRemovedOnFailure() throws {
-        let before = try FileManager.default.contentsOfDirectory(atPath: FileManager.default.temporaryDirectory.path)
-            .filter { $0.hasPrefix("IPAInspector-") }
+        // Parallel-safe: the analyzer reports the exact directory it created,
+        // so this run's cleanup is verified directly (other tests legitimately
+        // create their own IPAInspector-* directories concurrently).
         let url = tempDirectory.appendingPathComponent("broken.ipa")
         try Data(repeating: 0x41, count: 5000).write(to: url)
         let analyzer = IPAAnalyzer()
+        var createdRoot: URL?
+        analyzer.onWorkRootCreated = { createdRoot = $0 }
         _ = try? analyzer.analyze(ipaURL: url, progress: { _ in }, isCancelled: { false })
-        let after = try FileManager.default.contentsOfDirectory(atPath: FileManager.default.temporaryDirectory.path)
-            .filter { $0.hasPrefix("IPAInspector-") }
-        XCTAssertEqual(before.count, after.count,
-                       "a failed run must not leave analysis work directories behind")
+
+        let root = try XCTUnwrap(createdRoot, "the analyzer must report the directory it created")
+        XCTAssertNil(analyzer.currentWorkRoot,
+                     "a failed run must clear its working-directory reference")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.path),
+                       "the failed run's working directory must be removed from disk")
     }
 
     func testProgressIsReportedThroughout() throws {

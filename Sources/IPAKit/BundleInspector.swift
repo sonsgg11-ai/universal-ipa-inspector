@@ -418,8 +418,9 @@ final class BundleInspector {
             guard MachOParser.looksLikeMachO(head) else { continue }
 
             let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0
-            guard let data = size <= Int64(policy.maxBinaryScanBytes) * 4
-                    ? try? Data(contentsOf: url, options: .alwaysMapped) : nil else {
+            let loaded = size <= Int64(policy.maxBinaryScanBytes) * 4
+                ? try? Data(contentsOf: url, options: .alwaysMapped) : nil
+            guard let data = loaded else {
                 report.findings.append(Finding(
                     category: "Binary", title: (file.path as NSString).lastPathComponent,
                     value: "larger than the in-memory parse limit; inventoried but not parsed",
@@ -700,7 +701,7 @@ final class BundleInspector {
             }
             let url = extraction.root.appendingPathComponent(binary.path)
             let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0
-            if size > Int64(policy.maxBinaryScanBytes) { continue }
+            if size ?? 0 > Int64(policy.maxBinaryScanBytes) { continue }
             var scanner = StringScanner(url: url, maxBytes: policy.maxBinaryScanBytes)
             let strings = scanner.strings()
             if !strings.isEmpty {
@@ -766,7 +767,7 @@ final class BundleInspector {
                 counts[url, default: 0] += 1
                 if counts.count >= self.policy.maxURLs { stop.pointee = true }
             }
-            if counts.count >= policy.maxURLs { break }
+            if counts.count >= self.policy.maxURLs { break }
         }
 
         report.urls = counts.sorted {

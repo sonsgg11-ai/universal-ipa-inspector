@@ -1,98 +1,106 @@
 import Foundation
 
-/// One SDK fingerprint: a name, a reporting category, and lowercase substring
-/// patterns matched against bundle paths and linked-library names.
-struct SDKSignature {
+/// A fingerprint for one known third-party SDK.
+struct SDKSignature: Sendable {
     let name: String
     let category: String
+    /// Lowercase substrings matched against bundle paths, framework names and
+    /// linked library paths.
     let patterns: [String]
-    /// What a match does and does not mean, shown to the reader.
     let notes: String
+    /// Whether this SDK is known to collect analytics/tracking data.
+    let tracksUsers: Bool
 }
 
-/// Known third-party fingerprints. Presence of a library in the bundle is a
-/// fact about the bundle, not about what the app does with it — every note
-/// says so, because over-claiming here is the classic analyzer mistake.
+/// Database of SDK fingerprints used by the supply-chain inventory.
+///
+/// The database is a local snapshot. It says a library is present; it never
+/// claims the library runs, and it carries no version or vulnerability data
+/// unless the bundle itself provides the version.
 enum SDKDatabase {
 
-    /// Fingerprints whose patterns are short enough to collide with unrelated
-    /// symbols or generic words. They are reported as `estimated` evidence.
-    static func isWeakFingerprint(_ signature: SDKSignature) -> Bool {
-        signature.patterns.contains { $0.count < 6 }
-    }
-
     static let all: [SDKSignature] = [
-        .init(name: "Unity", category: "Game engine",
-              patterns: ["unityframework.framework", "/data/managed/", "global-metadata.dat"],
-              notes: "Unity embeds managed data and a native runtime; their presence shows an Unity build but not which engine features are used."),
-        .init(name: "Unreal Engine", category: "Game engine",
-              patterns: [".pak", "/cookeddata/", "ue4commandline", "uecommandline"],
-              notes: "Unreal ships cooked content in .pak archives; loose assets outside .pak files are not detected."),
-        .init(name: "Cocos2d-x", category: "Game engine",
-              patterns: ["cocos2d", "libcocos"],
-              notes: "Cocos2d-x is often statically linked, so symbol-level checks would be needed for certainty."),
-        .init(name: "Godot", category: "Game engine",
-              patterns: [".pck", "godot"],
-              notes: "The short 'godot' pattern can appear in unrelated words; treat a lone match with care."),
-        .init(name: "SpriteKit", category: "Game engine",
-              patterns: ["spritekit.framework"],
-              notes: "A system framework; linking does not mean the app renders with it."),
-        .init(name: "SceneKit", category: "Game engine",
-              patterns: ["scenekit.framework", ".scn"],
-              notes: "A system framework; .scn assets indicate 3D content authored for SceneKit."),
-        .init(name: "Flutter", category: "Cross-platform",
-              patterns: ["flutter.framework", "app.framework/flutter_assets"],
-              notes: "Dart code is compiled to native instructions plus an assets blob; no interpreter is present."),
-        .init(name: "React Native", category: "Cross-platform",
-              patterns: ["main.jsbundle", "react.framework", "hermes.framework"],
-              notes: "JavaScript runs in JavaScriptCore or Hermes; business logic may be inspectable in the bundle."),
-        .init(name: "Firebase", category: "Backend/Analytics",
-              patterns: ["googleservice-info.plist", "firebasecore", "firebaseanalytics"],
-              notes: "The plist usually carries project IDs and API keys; the Secrets scan covers the key patterns."),
-        .init(name: "Firebase Crashlytics", category: "Crash reporting",
-              patterns: ["firebasecrashlytics"],
-              notes: "Crash reporters upload device state; the privacy manifest should declare it."),
-        .init(name: "Sentry", category: "Crash reporting",
-              patterns: ["sentry.framework"],
-              notes: "Crash reporters upload device state; the privacy manifest should declare it."),
-        .init(name: "Facebook SDK", category: "Analytics/Auth",
-              patterns: ["fbsdkcorekit", "fbaemkit"],
-              notes: "Meta SDKs collect device and usage data; check the privacy manifest for declarations."),
-        .init(name: "AppsFlyer", category: "Attribution",
-              patterns: ["appsflyerlib"],
-              notes: "Attribution SDKs correlate installs with ad clicks; typically declared in the privacy manifest."),
-        .init(name: "Adjust", category: "Attribution",
-              patterns: ["adjustsdk", "adjust.framework"],
-              notes: "Attribution SDKs correlate installs with ad clicks; typically declared in the privacy manifest."),
-        .init(name: "Google Mobile Ads", category: "Advertising",
-              patterns: ["googlemobileads"],
-              notes: "Ad SDKs bundle many sub-frameworks; only the umbrella is fingerprinted here."),
-        .init(name: "AppLovin", category: "Advertising",
-              patterns: ["applovinsdk"],
-              notes: "Ad mediation SDKs; embedded adapters may not all be fingerprinted."),
-        .init(name: "IronSource", category: "Advertising",
-              patterns: ["ironsource"],
-              notes: "Ad mediation SDKs; embedded adapters may not all be fingerprinted."),
-        .init(name: "Unity Ads", category: "Advertising",
-              patterns: ["unityads.framework"],
-              notes: "Part of the Unity distribution; only meaningful when Unity is also present."),
-        .init(name: "RevenueCat", category: "Payments",
-              patterns: ["revenuecat"],
-              notes: "In-app purchase infrastructure; receipt validation happens server-side."),
-        .init(name: "Stripe", category: "Payments",
-              patterns: ["stripe"],
-              notes: "The short pattern can match unrelated strings like 'stripe' in assets; check the evidence path."),
-        .init(name: "Google Sign-In", category: "Auth",
-              patterns: ["googlesignin"],
-              notes: "OAuth sign-in typically pairs with a client ID in the plist or entitlements."),
-        .init(name: "Alamofire", category: "Networking",
-              patterns: ["alamofire"],
-              notes: "A Swift HTTP library; its presence says nothing about which endpoints are used."),
-        .init(name: "Realm", category: "Database",
-              patterns: ["realm.framework", "realmswift"],
-              notes: "Local database files may sit in the app container, not the bundle."),
-        .init(name: "OneSignal", category: "Push",
-              patterns: ["onesignal"],
-              notes: "Push SDKs tie devices to user identities; the privacy manifest should declare it."),
+        .init(name: "Unity", category: "Game engine", patterns: ["unityframework.framework", "/data/managed/", "global-metadata.dat"],
+              notes: "Unity engine runtime detected.", tracksUsers: false),
+        .init(name: "Unreal Engine", category: "Game engine", patterns: [".pak", "/cookeddata/", "ue4commandline", "uecommandline"],
+              notes: "Unreal Engine runtime detected.", tracksUsers: false),
+        .init(name: "Cocos2d-x", category: "Game engine", patterns: ["cocos2d", "libcocos"],
+              notes: "Cocos2d-x engine detected.", tracksUsers: false),
+        .init(name: "Godot", category: "Game engine", patterns: [".pck", "godot"],
+              notes: "Godot engine detected.", tracksUsers: false),
+        .init(name: "SpriteKit", category: "Apple framework", patterns: ["spritekit.framework"],
+              notes: "Apple 2D graphics framework.", tracksUsers: false),
+        .init(name: "SceneKit", category: "Apple framework", patterns: ["scenekit.framework", ".scn"],
+              notes: "Apple 3D graphics framework.", tracksUsers: false),
+        .init(name: "Flutter", category: "Cross-platform", patterns: ["flutter.framework", "app.framework/flutter_assets"],
+              notes: "Flutter cross-platform runtime.", tracksUsers: false),
+        .init(name: "React Native", category: "Cross-platform", patterns: ["main.jsbundle", "react.framework", "hermes.framework"],
+              notes: "React Native cross-platform runtime.", tracksUsers: false),
+        .init(name: "Firebase", category: "Backend/Analytics", patterns: ["googleservice-info.plist", "firebasecore"],
+              notes: "Firebase configuration and core are present. Firebase components commonly collect analytics data; check the privacy manifest for what is declared.", tracksUsers: true),
+        .init(name: "Firebase Analytics", category: "Analytics", patterns: ["firebaseanalytics", "firebaseinstanceid", "firebasemessaging"],
+              notes: "Firebase analytics/messaging components detected.", tracksUsers: true),
+        .init(name: "Firebase Crashlytics", category: "Crash reporting", patterns: ["firebasecrashlytics"],
+              notes: "Crashlytics collects device and crash data.", tracksUsers: true),
+        .init(name: "Sentry", category: "Crash reporting", patterns: ["sentry.framework", "sentrycrash"],
+              notes: "Sentry crash reporting detected.", tracksUsers: false),
+        .init(name: "Bugsnag", category: "Crash reporting", patterns: ["bugsnag"],
+              notes: "Bugsnag crash reporting detected.", tracksUsers: false),
+        .init(name: "Facebook SDK", category: "Analytics/Auth", patterns: ["fbsdkcorekit", "fbaemkit", "fbsdksharekit"],
+              notes: "Meta SDK detected. It is commonly used for login and attribution and is known to collect data for advertising; check the privacy manifest.", tracksUsers: true),
+        .init(name: "AppsFlyer", category: "Attribution", patterns: ["appsflyerlib"],
+              notes: "AppsFlyer is a mobile attribution provider.", tracksUsers: true),
+        .init(name: "Adjust", category: "Attribution", patterns: ["adjustsdk", "adjust.framework"],
+              notes: "Adjust is a mobile attribution provider.", tracksUsers: true),
+        .init(name: "Branch", category: "Attribution", patterns: ["branch.framework", "branchio"],
+              notes: "Branch deep-link attribution detected.", tracksUsers: true),
+        .init(name: "Google Mobile Ads", category: "Advertising", patterns: ["googlemobileads"],
+              notes: "Google Mobile Ads SDK (AdMob) detected.", tracksUsers: true),
+        .init(name: "AppLovin", category: "Advertising", patterns: ["applovinsdk"],
+              notes: "AppLovin advertising SDK detected.", tracksUsers: true),
+        .init(name: "IronSource", category: "Advertising", patterns: ["ironsource"],
+              notes: "ironSource advertising SDK detected.", tracksUsers: true),
+        .init(name: "Unity Ads", category: "Advertising", patterns: ["unityads.framework"],
+              notes: "Unity Ads detected.", tracksUsers: true),
+        .init(name: "RevenueCat", category: "Payments", patterns: ["revenuecat"],
+              notes: "RevenueCat subscription infrastructure detected.", tracksUsers: false),
+        .init(name: "Stripe", category: "Payments", patterns: ["stripe"],
+              notes: "Stripe SDK detected. Short pattern: may match unrelated strings.", tracksUsers: false),
+        .init(name: "Google Sign-In", category: "Auth", patterns: ["googlesignin"],
+              notes: "Google Sign-In detected.", tracksUsers: false),
+        .init(name: "Sign in with Apple", category: "Auth", patterns: ["authenticationservices.framework"],
+              notes: "AuthenticationServices linked (Apple sign-in/credential provider).", tracksUsers: false),
+        .init(name: "Alamofire", category: "Networking", patterns: ["alamofire"],
+              notes: "Alamofire HTTP library detected.", tracksUsers: false),
+        .init(name: "Realm", category: "Database", patterns: ["realm.framework", "realmswift"],
+              notes: "Realm local database detected.", tracksUsers: false),
+        .init(name: "OneSignal", category: "Push", patterns: ["onesignal"],
+              notes: "OneSignal push/analytics detected.", tracksUsers: true),
+        .init(name: "Amplitude", category: "Analytics", patterns: ["amplitude"],
+              notes: "Amplitude product analytics detected.", tracksUsers: true),
+        .init(name: "Mixpanel", category: "Analytics", patterns: ["mixpanel"],
+              notes: "Mixpanel product analytics detected.", tracksUsers: true),
+        .init(name: "Segment", category: "Analytics", patterns: ["segment.framework", "analytics-swift"],
+              notes: "Segment analytics pipeline detected.", tracksUsers: true),
+        .init(name: "Braze", category: "Analytics", patterns: ["braze", "appboy"],
+              notes: "Braze engagement platform detected.", tracksUsers: true),
+        .init(name: "CleverTap", category: "Analytics", patterns: ["clevertap"],
+              notes: "CleverTap engagement platform detected.", tracksUsers: true),
+        .init(name: "Kochava", category: "Attribution", patterns: ["kochava"],
+              notes: "Kochava attribution detected.", tracksUsers: true),
+        .init(name: "Tencent/WeChat SDK", category: "Social", patterns: ["wechatopensdk"],
+              notes: "WeChat SDK detected.", tracksUsers: false),
+        .init(name: "Twitter/X SDK", category: "Social", patterns: ["twitterkit", "twittercore"],
+              notes: "X (Twitter) SDK detected.", tracksUsers: false),
+        .init(name: "Line SDK", category: "Social", patterns: ["linesdk"],
+              notes: "LINE SDK detected.", tracksUsers: false),
     ]
+
+    /// A fingerprint is "weak" when its patterns are short and common, which
+    /// risks matching unrelated strings. Weak matches are reported with
+    /// estimated evidence status.
+    static func isWeakFingerprint(_ signature: SDKSignature) -> Bool {
+        let short = signature.patterns.filter { $0.count <= 8 }
+        return !short.isEmpty && Double(short.count) / Double(signature.patterns.count) > 0.5
+    }
 }

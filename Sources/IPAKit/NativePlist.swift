@@ -1,60 +1,83 @@
 import Foundation
 
-/// Property-list reading and human-readable description.
+/// Robust property-list reading.
 ///
-/// A thin wrapper over PropertyListSerialization so every caller shares the
-/// same parsing and the same value formatting, and so the eventual switch to a
-/// hand-written parser (if one is ever needed) touches a single file.
+/// `PropertyListSerialization` is used behind strict error handling so a
+/// malformed or encrypted plist yields `nil` instead of an exception, and
+/// values are rendered with a single consistent describer.
 enum NativePlist {
 
-    /// Parses any property list (XML or binary). Returns nil on failure.
-    static func parse(_ data: Data) -> Any? {
-        try? PropertyListSerialization.propertyList(from: data, format: nil)
+    enum PlistError: Error {
+        case notAPropertyList
     }
 
-    /// Parses a property list whose root is a dictionary.
+    /// Parses a plist (binary or XML) into a dictionary, or nil.
     static func dictionary(_ data: Data) -> [String: Any]? {
-        parse(data) as? [String: Any]
+        guard !data.isEmpty else { return nil }
+        guard let any = parse(data) else { return nil }
+        return any as? [String: Any]
     }
 
-    /// Renders a plist value the way a human would want to read it: strings
-    /// bare, booleans as true/false, dates ISO-8601, containers pretty-printed.
-    static func describe(_ value: Any) -> String {
+    /// Parses any plist value, or nil on malformed input.
+    static func parse(_ data: Data) -> Any? {
+        guard !data.isEmpty else { return nil }
+        // Reject obvious non-plists fast (performance + avoids deep decoder
+        // work on hostile input).
+        let head = [UInt8](data.prefix(64))
+        let isXML = Array(head.prefix(5).map { Character(UnicodeScalar($0)) }) == ["<", "?", "x", "m", "l"]
+        let isBinary = head.count >= 8 && head[0] == 0x62 && head[1] == 0x70 && head[2] == 0x6C && head[3] == 0x69
+            && head[4] == 0x73 && head[5] == 0x74 && head[6] == 0x30 && head[7] == 0x30
+        guard isXML || isBinary else { return nil }
+
+        var format = PropertyListSerialization.PropertyListFormat.openStep
+        do {
+            let any = try PropertyListSerialization.propertyList(
+                from: data, options: [.mutableContainers], format: &format)
+            return any
+        } catch {
+            return nil
+        }
+    }
+
+    /// One-line human description of an arbitrary plist value, with limits so
+    /// a giant value cannot flood the report.
+    static func describe(_ value: Any, maxItems: Int = 24) -> String {
         switch value {
-        case let string as String:
-            return string
-        case let bool as Bool:
-            return bool ? "true" : "false"
-        case let number as NSNumber:
-            return describeNumber(number)
+        case let s as String:
+            return s.count > 800 ? String(s.prefix(800)) + " …" : s
+        case let b as Bool:
+            return b ? "true" : "false"
+        case let n as NSNumber:
+            return n.stringValue
+        case let i as Int:
+            return String(i)
+        case let d as Double:
+            return String(d)
         case let date as Date:
             return ISO8601DateFormatter().string(from: date)
-        case let bytes as Data:
-            return "<\(bytes.count) bytes of binary data>"
+        case let data as Data:
+            return "<\(data.count) bytes of data>"
         case let array as [Any]:
-            return array.map(describe).joined(separator: ", ")
+            if array.isEmpty { return "(empty list)" }
+            let items = array.prefix(maxItems).map { describe($0, maxItems: 6) }
+            let more = array.count > maxItems ? " … (+\(array.count - maxItems))" : ""
+            return items.joined(separator: ", ") + more
         case let dict as [String: Any]:
-            return dict.sorted { $0.key < $1.key }
-                .map { "\($0.key): \(describe($0.value))" }
-                .joined(separator: "\n")
+            if dict.isEmpty { return "(empty dictionary)" }
+            let keys = dict.keys.sorted().prefix(maxItems)
+            let items = keys.map { "\($0): \(describe(dict[$0] ?? "", maxItems: 6))" }
+            let more = dict.count > maxItems ? " … (+\(dict.count - maxItems))" : ""
+            return items.joined(separator: "\n") + more
         default:
-            return String(describing: value)
+            return String(describing: value).prefix(400).description
         }
     }
 
-    private static func describeNumber(_ number: NSNumber) -> String {
-        let type = String(cString: number.objCType)
-        // Booleans can arrive as NSNumber with a char/bool objC type.
-        if type == "c" || type == "B" {
-            return number.boolValue ? "true" : "false"
-        }
-        if type == "f" || type == "d" {
-            let value = number.doubleValue
-            if value == value.rounded() && abs(value) < 1e15 {
-                return String(format: "%.0f", value)
-            }
-            return "\(value)"
-        }
-        return number.stringValue
+    /// Extracts the plist XML embedded in a CMS-signed mobileprovision blob.
+    static func plistRange(in data: Data) -> Data? {
+        guard let start = data.range(of: Data("<?xml".utf8)),
+              let end = data.range(of: Data("</plist>".utf8), in: start.lowerBound..<data.endIndex)
+        else { return nil }
+        return data.subdata(in: start.lowerBound..<end.upperBound)
     }
 }

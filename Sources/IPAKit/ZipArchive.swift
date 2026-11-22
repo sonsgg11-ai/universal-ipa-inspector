@@ -18,6 +18,27 @@ enum ZipArchive {
         var isDirectory: Bool
         /// External file attributes' high 16 bits (Unix mode) when present.
         var unixMode: UInt16?
+
+        /// Convenience init for tests and fixture builders: sizes default to
+        /// the in-memory contents; directories are detected from the path.
+        init(path: String,
+             contents: Data = Data(),
+             compressionMethod: UInt16 = 0,
+             localHeaderOffset: Int64 = 0,
+             isSymlink: Bool = false,
+             isDirectory: Bool = false,
+             compressedSize: Int64? = nil,
+             uncompressedSize: Int64? = nil,
+             unixMode: UInt16? = nil) {
+            self.path = path
+            self.compressionMethod = compressionMethod
+            self.localHeaderOffset = localHeaderOffset
+            self.isSymlink = isSymlink
+            self.isDirectory = isDirectory
+            self.compressedSize = compressedSize ?? Int64(contents.count)
+            self.uncompressedSize = uncompressedSize ?? Int64(contents.count)
+            self.unixMode = unixMode
+        }
     }
 
     enum ZipError: LocalizedError {
@@ -48,7 +69,7 @@ enum ZipArchive {
     /// Largest central directory we will trust, and the largest single entry we
     /// will decompress. Both are policy limits, not ZIP limits.
     static let maxCentralDirectoryBytes = 64 * 1024 * 1024
-    static let maxEntryUncompressed: Int64 = 8 * 1024 * 1024 * 1024        // 8 GiB
+    static let maxEntryUncompressed: Int64 = 8 * 1024 * 1024 * 1024  // 8 GiB
     static let maxTotalUncompressed: Int64 = 32 * 1024 * 1024 * 1024 // 32 GiB
     static let maxCompressionRatio: Int64 = 2000
 
@@ -162,12 +183,12 @@ enum ZipArchive {
             path = path.replacingOccurrences(of: "\\", with: "/")
 
             entries.append(Entry(path: path,
-                                 compressedSize: compressedSize,
-                                 uncompressedSize: uncompressedSize,
                                  compressionMethod: method,
                                  localHeaderOffset: entryOffset,
                                  isSymlink: isSymlink,
                                  isDirectory: path.hasSuffix("/"),
+                                 compressedSize: compressedSize,
+                                 uncompressedSize: uncompressedSize,
                                  unixMode: mode == 0 ? nil : mode))
             cursor += 46 + Int(nameLength) + Int(extraLength) + Int(commentLength)
         }

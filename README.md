@@ -1,56 +1,81 @@
 # IPA Inspector
 
-A SwiftUI iOS app that inspects iOS app archives (`.ipa`) entirely on-device, plus a
-portable Swift package (`IPAKit`) holding all of the analysis logic.
+A native iOS 17+ workbench for static analysis and security assessment of iOS
+apps (.ipa files). Everything runs **on device** — no analysis data, IPA bytes
+or secrets ever leave the phone, and there is no code path that uploads them.
 
 ## What it does
 
-- **IPA analysis** — safe ZIP extraction (path traversal, symlink, zip-bomb and size
-  policy), Mach-O parsing (thin + FAT, load commands, segments, UUID, entitlements
-  from the code signature), Info.plist / provisioning profile / privacy manifest
-  inspection, SDK fingerprinting, URL and host collection, and redacted
-  credential-pattern scanning. Encrypted (FairPlay) binaries are reported as
-  *blocked*, never guessed at.
-- **App Store lookup** — public listing metadata for a store link or app ID; it
-  never fetches a binary.
-- Every finding carries a source path, an evidence status and a note explaining
-  what it does and does not prove. Reports export as JSON.
+| Module | Capability |
+|---|---|
+| Overview | Dashboard built only from real analysis results (identity, sizes, hashes, counts, findings by severity) |
+| File Explorer | Full IPA directory tree, per-file metadata (type, size, compression, permissions, SHA-256), text/plist/JSON/XML/strings/image previews, hex viewer with byte/ASCII columns, hex+text search, jump-to-offset — streamed, never loading whole files |
+| Mach-O | Thin / FAT / FAT64 parsing: headers, load commands, segments & sections, linked libraries, runtime paths, UUIDs, encryption status |
+| Swift Metadata | `__swift5_*` section inventory, mangled type names, reflection strings (honest `estimated` status; encrypted binaries reported blocked) |
+| Objective-C | Class/method/category name extraction from `__objc_*` sections with section sizes as evidence |
+| Symbols | LC_SYMTAB parsing: imported / exported / local symbols per architecture |
+| Strings | Streaming strings extraction from unencrypted binaries |
+| Dependencies | Embedded frameworks and extensions, Apple frameworks linked, hosts referenced, SDK inventory |
+| Security | 20+ OWASP MASVS/MASTG-mapped static checks with severity, confidence, evidence, precise source location, remediation and honest evidence status |
+| Secrets | Pattern + entropy+context credential detection, allowlisted examples, masked everywhere, local-only reveal, file+offset provenance |
+| SDK Inventory | Fingerprinting from paths/frameworks/link tables, versions only from bundle metadata, duplicate-framework and suspicious-rename detection, **no fabricated CVEs** |
+| Signing | embedded.mobileprovision parsing (team, expiry, devices, distribution), entitlements, signature states distinguishing unsigned / blob present / structurally checked / cryptographically verified (never claimed) |
+| Reports | JSON (complete), PDF (hand-rolled writer), CSV (findings/symbols/components), TXT summary, and the full `IPAInspector-Analysis-Report` ZIP package with manifest and completeness metadata |
 
-## Layout
+## Architecture
 
 ```
-Sources/IPAKit/    Analysis logic (Swift package, tested on Linux and iOS)
-App/               SwiftUI app layer (iOS 17+)
-Tests/IPAKitTests/ Unit + end-to-end tests over synthetic archives
-project.yml        XcodeGen spec for the iOS application target
+Sources/IPAKit/     Engine — pure Foundation, runs and tests on Linux AND iOS
+  ├─ IPAAnalyzer        ZIP safety policy + staged extraction pipeline
+  ├─ BundleInspector    Info.plist, permissions, ATS, profile, privacy manifests
+  ├─ MachO              Mach-O/FAT parser + symbol table + section access
+  ├─ ZipArchive         Bounds-checked central directory + extraction plan
+  ├─ AnalysisEngine     Async staged façade (progress, cancellation, caches)
+  ├─ SecurityAssessor   MASVS/MASTG rules engine
+  ├─ SecretScanner      Pattern + entropy+context detection, masking
+  ├─ StructureAnalyzer  Components, versions, compatibility
+  ├─ ProvisioningParser Profile + signature states
+  ├─ FairPlayDetector   Per-slice cryptid/cryptoff/cryptsize reporting
+  ├─ CrossBinarySearch  Unified search index + history
+  ├─ DashboardProvider  Real-data aggregation
+  ├─ ReportExporter     JSON / CSV / TXT / PDF writer
+  ├─ ExportPackager     Complete-analysis ZIP with manifest
+  ├─ MCPCore            Optional real JSON-RPC 2.0 tool server (no fake AI)
+  └─ …
+App/                SwiftUI layer (iOS only) — 12-module navigation, design system
+Tests/IPAKitTests/  97 tests incl. fixture builder (synthetic IPA/Mach-O/ZIP)
 ```
 
-## Building the app (macOS)
+## Build & test
 
 ```bash
+# Logic tests (Linux or macOS)
+swift test
+
+# iOS app
 brew install xcodegen
 xcodegen generate
 xcodebuild -project IPAInspector.xcodeproj -scheme IPAInspector \
   -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
-  -derivedDataPath build \
-  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
+  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build
 ```
 
-The unsigned `.app` is then zipped into `Payload/…` to form an installable IPA.
-GitHub Actions does exactly this on every push to `main` and publishes the result
-as a GitHub Release asset (`IPAInspector-unsigned.ipa`).
+## CI
 
-## Running the tests
+`.github/workflows/build.yml`:
+1. **logic-tests** — full suite on ubuntu-24.04 + Swift 6.0.1
+2. **discover-toolchain** — picks the newest Xcode present on the runner
+3. **ios-build** — xcodegen + unsigned build + IPA structure validation
+4. **release** — publishes the IPA as the stable asset **`unsigned-latest.ipa`**
+   under the moving tag `unsigned-latest` (stable download URL, SHA-256 in the
+   job log).
 
-```bash
-swift test
-```
+## Honesty rules (enforced in code)
 
-The logic tests run on macOS and Linux without any Apple-specific framework.
-
-## Honest limitations
-
-Static analysis cannot prove completeness. URLs assembled at runtime, secrets
-behind encryption, and SDK behaviour are out of reach; the report marks those
-limits instead of papering over them. Nothing here retrieves an IPA from an App
-Store link, and nothing decrypts FairPlay.
+* Every finding carries an evidence status: verified / detected / estimated /
+  blocked / not found. Suspicion is never labelled vulnerability.
+* Encrypted (FairPlay) slices produce *blocked* findings, never silent empty
+  results. Nothing decrypts.
+* Secrets are masked by default; reveal is local-only and explicit.
+* No fabricated SDK versions or CVEs — versions come from bundle metadata only.
+* The original IPA is never modified; analysis works on a staged copy.

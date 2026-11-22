@@ -2,21 +2,24 @@
 import PackageDescription
 
 let package = Package(
-    name: "IPAKit",
+    name: "IPAInspector",
+    platforms: [
+        .iOS(.v17),
+        .macOS(.v13),
+    ],
     products: [
-        .library(name: "IPAKit", targets: ["IPAKit"])
+        .library(name: "IPAKit", targets: ["IPAKit"]),
     ],
     dependencies: [
-        // SHA-256 on Linux. On Apple platforms CryptoKit is used directly and
-        // this package is only a build-time guest (its Crypto product re-exports
-        // CryptoKit there), so the iOS app gains no extra dependency from it.
-        .package(url: "https://github.com/apple/swift-crypto.git", "2.0.0"..<"4.0.0")
+        .package(url: "https://github.com/weichsel/ZIPFoundation", from: "0.9.19"),
+        .package(url: "https://github.com/apple/swift-crypto", from: "3.3.0"),
     ],
     targets: [
         .target(
             name: "IPAKit",
             dependencies: [
-                .product(name: "Crypto", package: "swift-crypto")
+                .product(name: "ZIPFoundation", package: "ZIPFoundation"),
+                .product(name: "Crypto", package: "swift-crypto"),
             ],
             path: "Sources/IPAKit"
         ),
@@ -24,6 +27,6 @@ let package = Package(
             name: "IPAKitTests",
             dependencies: ["IPAKit"],
             path: "Tests/IPAKitTests"
-        )
+        ),
     ]
 )

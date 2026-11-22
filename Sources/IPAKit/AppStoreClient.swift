@@ -3,77 +3,65 @@ import Foundation
 import FoundationNetworking
 #endif
 
-/// Reads public App Store listing metadata through Apple's iTunes Lookup API.
+/// Talks to the public iTunes Lookup API.
 ///
-/// This is metadata only. Nothing in the lookup response contains the binary;
-/// an IPA is never downloaded from a store link and this client never tries.
+/// This is the only network surface in the whole app, and it only ever
+/// fetches public store listings. IPA bytes and analysis results are never
+/// transmitted anywhere.
 enum AppStoreClient {
 
-    /// Storefronts offered in the UI. The lookup endpoint accepts any ISO
-    /// two-letter country code; these are the common ones.
-    static let knownStorefronts = [
-        "au", "br", "ca", "cn", "de", "es", "fr", "gb", "in", "it",
-        "jp", "kr", "mx", "nl", "ru", "se", "tr", "us", "za",
+    static let knownStorefronts: Set<String> = [
+        "us", "gb", "de", "fr", "it", "es", "nl", "se", "pl", "jp", "kr", "cn",
+        "in", "au", "ca", "br", "mx", "ru", "tr", "ae", "sa", "za", "ng", "hk",
+        "tw", "th", "sg", "id", "vn", "ph", "my", "ar", "cl", "co", "dk", "fi",
+        "no", "ie", "at", "ch", "be", "pt", "gr", "cz", "hu", "ro", "il",
     ]
 
-    /// Extracts an app ID from a bare numeric ID or a store URL.
-    /// Returns the ID and the country inferred from the URL, if any.
+    /// Accepts "123456789", a full store URL, or a URL containing `id…`.
     static func parse(_ input: String) -> (id: String, country: String)? {
-        let trimmed = input.trimmingCharacters(in: .whitespaces)
-        if !trimmed.isEmpty, trimmed.count >= 6, trimmed.allSatisfy(\.isNumber) {
-            return (trimmed, "us")
-        }
+        let s = input.trimmingCharacters(in: .whitespaces)
+        if s.allSatisfy(\.isNumber), s.count >= 6 { return (s, "us") }
         guard let regex = try? NSRegularExpression(pattern: #"id(\d{6,})"#),
-              let match = regex.firstMatch(
-                in: trimmed,
-                range: NSRange(location: 0, length: (trimmed as NSString).length))
+              let match = regex.firstMatch(in: s,
+                                          range: NSRange(location: 0, length: (s as NSString).length))
         else { return nil }
-
-        let id = (trimmed as NSString).substring(with: match.range(at: 1))
+        let id = (s as NSString).substring(with: match.range(at: 1))
         var country = "us"
-        if let url = URL(string: trimmed), url.pathComponents.count > 1,
-           url.pathComponents[1].count == 2 {
+        if let url = URL(string: s), url.pathComponents.count > 1, url.pathComponents[1].count == 2 {
             country = url.pathComponents[1].lowercased()
         }
         return (id, country)
     }
 
-    /// Performs the lookup and turns the listing into a report. Fields the
-    /// store does not publish are listed as blocked, with the reason stated.
+    /// Fetches public listing metadata. Returns a Report with verified store
+    /// fields and explicit "blocked" entries for everything that requires an
+    /// IPA, so the distinction is visible in the UI.
     static func lookup(input: String, storefront: String = "us") async throws -> Report {
-        guard let (id, _) = parse(input) else {
-            throw NSError(
-                domain: "AppStore", code: 1,
-                userInfo: [NSLocalizedDescriptionKey:
-                    "Could not find an App Store ID in that link. Paste a link containing id123456789 or a bare numeric ID."])
+        guard let (id, country) = parse(input) else {
+            throw StoreError.badLink
         }
-
-        let country = storefront.lowercased()
-        guard let url = URL(string: "https://itunes.apple.com/lookup?id=\(id)&country=\(country)&entity=software") else {
-            throw NSError(
-                domain: "AppStore", code: 3,
-                userInfo: [NSLocalizedDescriptionKey: "Could not build the lookup URL for ID \(id)."])
-        }
+        var components = URLComponents(string: "https://itunes.apple.com/lookup")!
+        components.queryItems = [
+            URLQueryItem(name: "id", value: id),
+            URLQueryItem(name: "country", value: country),
+            URLQueryItem(name: "entity", value: "software"),
+        ]
+        guard let url = components.url else { throw StoreError.badLink }
 
         let (data, response) = try await URLSession.shared.data(from: url)
         guard (response as? HTTPURLResponse)?.statusCode == 200,
               let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let app = (json["results"] as? [[String: Any]])?.first
         else {
-            throw NSError(
-                domain: "AppStore", code: 2,
-                userInfo: [NSLocalizedDescriptionKey:
-                    "No app found for ID \(id) in storefront \(country.uppercased())."])
+            throw StoreError.noResult(id: id, country: country)
         }
 
         let source = "iTunes Lookup API (\(country.uppercased()))"
         var report = Report(source: "App Store", name: app["trackName"] as? String ?? id)
-        report.findings.append(Finding(
-            category: "App Store", title: "App Store ID", value: id, source: source, status: .verified))
-
         let fields: [(String, String)] = [
-            ("bundleId", "Bundle ID"),
             ("trackName", "Name"),
+            ("bundleId", "Bundle ID"),
+            ("trackId", "App Store ID"),
             ("artistName", "Developer"),
             ("sellerName", "Seller"),
             ("version", "Version"),
@@ -105,25 +93,27 @@ enum AppStoreClient {
                 category: "App Store", title: "Supported devices",
                 value: "\(devices.count) models", source: source, status: .verified))
         }
-        if let url_display = app["trackViewUrl"] as? String {
-            report.findings.append(Finding(
-                category: "App Store", title: "Store URL",
-                value: url_display, source: source, status: .verified))
-        }
-
-        // Be explicit about what a store link cannot provide.
-        for (title, why) in [
-            ("Binary / Mach-O analysis", "The store distributes an encrypted download that is only decryptable on a licensed device."),
-            ("Frameworks & SDKs", "The bundle layout is not part of the listing data."),
-            ("Entitlements", "Entitlements live in the code signature of the binary."),
-            ("Embedded URLs & endpoints", "Endpoints are strings inside the bundle, not listing fields."),
-            ("Resources & assets", "Resources are inside the bundle, not the listing."),
-        ] {
+        for title in ["Binary / Mach-O analysis", "Frameworks & SDKs", "Entitlements",
+                      "Embedded URLs & endpoints", "Resources & assets"] {
             report.findings.append(Finding(
                 category: "Requires IPA", title: title,
                 value: "Not obtainable from a store link. Import an IPA you are authorised to analyse.",
-                source: "—", status: .blocked, note: why))
+                source: "—", status: .blocked))
         }
         return report
+    }
+
+    enum StoreError: LocalizedError {
+        case badLink
+        case noResult(id: String, country: String)
+
+        var errorDescription: String? {
+            switch self {
+            case .badLink:
+                return "Could not find an App Store ID in that link."
+            case .noResult(let id, let country):
+                return "No app found for ID \(id) in storefront \(country.uppercased())."
+            }
+        }
     }
 }
