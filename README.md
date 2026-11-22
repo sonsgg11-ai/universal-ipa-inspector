@@ -21,12 +21,35 @@ or secrets ever leave the phone, and there is no code path that uploads them.
 | SDK Inventory | Fingerprinting from paths/frameworks/link tables, versions only from bundle metadata, duplicate-framework and suspicious-rename detection, **no fabricated CVEs** |
 | Signing | embedded.mobileprovision parsing (team, expiry, devices, distribution), entitlements, signature states distinguishing unsigned / blob present / structurally checked / cryptographically verified (never claimed) |
 | Reports | JSON (complete), PDF (hand-rolled writer), CSV (findings/symbols/components), TXT summary, and the full `IPAInspector-Analysis-Report` ZIP package with manifest and completeness metadata |
+| App Store listing | Public iTunes Lookup metadata from a store link: identity, versions, size, ratings, description, privacy-policy URL, storefront support. A store link never provides the binary — every binary-level section is reported `blocked` rather than faked |
+
+## Large-IPA pipeline (v0.2.0)
+
+Imports up to and beyond 1 GB are designed in, not bolted on:
+
+* **Staged copy** (`IPAStager`) — the imported file is copied out of the
+  document-picker sandbox in 4 MiB chunks on a background queue, with live
+  progress and cancellation. The UI never blocks and the IPA never doubles in
+  memory. Free storage is checked first against a conservative estimate
+  (copy + capped expansion + margin); the failure message names the fix.
+* **Streaming extraction** (`DeflateExtractor` + `ZipArchive.streamRawData`) —
+  stored entries stream to disk chunk by chunk; deflated entries decompress
+  through ZIPFoundation straight into a pre-created file handle. Nothing is
+  ever buffered whole, so peak memory stays at one chunk regardless of entry
+  size. Partial output is removed on failure, and a written-size mismatch is
+  reported instead of silently kept.
+* **Bounded scans** — binaries over the scan cap are hashed and inventoried
+  but not string-scanned; text resources over 8 MB are skipped for secrets;
+  the archive plan caps entries (500k), per-entry size (2 GB), total size
+  (4 GB) and compression ratio (2000:1, zip-bomb guard).
 
 ## Architecture
 
 ```
 Sources/IPAKit/     Engine — pure Foundation, runs and tests on Linux AND iOS
-  ├─ IPAAnalyzer        ZIP safety policy + staged extraction pipeline
+  ├─ IPAAnalyzer        ZIP safety policy + streaming extraction pipeline
+  ├─ IPAStager          Security-scoped staged copy, storage guard, progress
+  ├─ DeflateExtractor   Chunk-by-chunk deflate streaming via ZIPFoundation
   ├─ BundleInspector    Info.plist, permissions, ATS, profile, privacy manifests
   ├─ MachO              Mach-O/FAT parser + symbol table + section access
   ├─ ZipArchive         Bounds-checked central directory + extraction plan
@@ -43,7 +66,7 @@ Sources/IPAKit/     Engine — pure Foundation, runs and tests on Linux AND iOS
   ├─ MCPCore            Optional real JSON-RPC 2.0 tool server (no fake AI)
   └─ …
 App/                SwiftUI layer (iOS only) — 12-module navigation, design system
-Tests/IPAKitTests/  97 tests incl. fixture builder (synthetic IPA/Mach-O/ZIP)
+Tests/IPAKitTests/  105 tests incl. fixture builder (synthetic IPA/Mach-O/ZIP)
 ```
 
 ## Build & test

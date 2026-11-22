@@ -275,7 +275,22 @@ enum ZipArchive {
     // MARK: Decompression
 
     /// Raw "stored" copy of an entry's bytes, without decompressing.
+    /// Reads the whole entry into memory — only for bounded reads (previews,
+    /// hex windows); bulk extraction uses `streamRawData` instead.
     static func rawData(at url: URL, entry: Entry, maxBytes: Int64 = maxEntryUncompressed) throws -> Data {
+        var out = Data()
+        try streamRawData(at: url, entry: entry, maxBytes: maxBytes) { out.append($0) }
+        return out
+    }
+
+    /// Streams an entry's raw (still-compressed) bytes to a consumer chunk by
+    /// chunk, so peak memory stays at one chunk no matter how large the entry
+    /// is. Returns the number of bytes consumed.
+    static func streamRawData(at url: URL,
+                              entry: Entry,
+                              chunkSize: Int = 1 << 20,
+                              maxBytes: Int64 = maxEntryUncompressed,
+                              consumer: (Data) throws -> Void) throws -> Int64 {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         guard entry.localHeaderOffset >= 0 else { throw ZipError.corrupt("negative local header offset") }
@@ -291,11 +306,19 @@ enum ZipArchive {
         }
         let dataStart = entry.localHeaderOffset + 30 + Int64(nameLength) + Int64(extraLength)
         try handle.seek(toOffset: UInt64(dataStart))
-        let size = Int(min(entry.compressedSize, maxBytes))
-        guard let data = try handle.read(upToCount: size) else {
-            throw ZipError.corrupt("could not read \(entry.path)")
+        let remaining = Int(min(entry.compressedSize, maxBytes))
+        guard remaining >= 0 else { throw ZipError.corrupt("negative entry size for \(entry.path)") }
+
+        var consumed: Int64 = 0
+        while remaining - Int(consumed) > 0 {
+            let want = min(chunkSize, remaining - Int(consumed))
+            guard let chunk = try handle.read(upToCount: want), !chunk.isEmpty else {
+                throw ZipError.corrupt("archive ended before \(entry.path) was complete")
+            }
+            consumed += Int64(chunk.count)
+            try consumer(chunk)
         }
-        return data
+        return consumed
     }
 
     static func fileSize(of handle: FileHandle) throws -> Int64 {

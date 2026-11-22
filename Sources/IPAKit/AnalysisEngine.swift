@@ -57,6 +57,10 @@ final class AnalysisEngine {
         diagnosticsLock.unlock()
     }
 
+    /// True when cancellation was requested on this engine. Readable from any
+    /// thread, including from the staging copy before the engine task starts.
+    var isCancelled: Bool { cancelBox.isSet }
+
     var diagnostics: [String] {
         diagnosticsLock.lock(); defer { diagnosticsLock.unlock() }
         return diagnosticsStorage
@@ -92,8 +96,10 @@ final class AnalysisEngine {
                 do {
                     let report = try analyzer.analyze(
                         ipaURL: ipaURL,
-                        progress: { message in
-                            // Intermediate messages piggyback on the extract stage.
+                        progress: { [weak self] message in
+                            // Real-time messages from hashing, extraction and
+                            // bundle inspection reach the UI as they happen.
+                            self?.onProgress?(ProgressState(stage: .extract, message: message, fraction: 2.0 / 14.0))
                         },
                         isCancelled: { Task.isCancelled || self.cancelBox.isSet })
                     continuation.resume(returning: report)

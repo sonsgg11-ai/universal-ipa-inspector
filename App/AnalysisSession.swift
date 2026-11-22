@@ -27,6 +27,8 @@ final class AnalysisSession: ObservableObject {
     private var engine: AnalysisEngine?
     private var task: Task<Void, Never>?
     private var workingRoot: URL?
+    /// The staged working copy of the imported IPA; removed when the run ends.
+    private var stagedInput: URL?
 
     var isRunning: Bool {
         if case .running = phase { return true }
@@ -80,27 +82,6 @@ final class AnalysisSession: ObservableObject {
         log = ["Importing \(name)"]
         phase = .running("Preparing…")
 
-        // Copy out of the importer's sandbox first, on the main actor, while
-        // the security scope is held. The copy is what the engine reads.
-        let staged = FileManager.default.temporaryDirectory
-            .appendingPathComponent("IPAInspector-input-\(UUID().uuidString)")
-            .appendingPathComponent(name)
-
-        let accessed = ipaURL.startAccessingSecurityScopedResource()
-        defer { if accessed { ipaURL.stopAccessingSecurityScopedResource() } }
-
-        do {
-            try FileManager.default.createDirectory(at: staged.deletingLastPathComponent(),
-                                                    withIntermediateDirectories: true)
-            try? FileManager.default.removeItem(at: staged)
-            try FileManager.default.copyItem(at: ipaURL, to: staged)
-        } catch {
-            phase = .failed("Could not read the selected file: \(error.localizedDescription)")
-            return
-        }
-        let stagedSize = (try? FileManager.default.attributesOfItem(atPath: staged.path)[.size] as? Int64) ?? 0
-        log.append("Staged a working copy (\(ByteFormat.string(stagedSize))).")
-
         let newEngine = AnalysisEngine()
         engine = newEngine
         newEngine.onProgress = { [weak self] state in
@@ -113,6 +94,26 @@ final class AnalysisSession: ObservableObject {
 
         task = Task { [weak self] in
             do {
+                // Staging runs off the main actor: the IPA is copied in fixed
+                // chunks with live progress, so a 1 GB import never freezes
+                // the interface and never doubles in memory. Storage is
+                // checked up front and the failure names the fix.
+                let staged = try await IPAStager.stage(
+                    ipaURL: ipaURL,
+                    isCancelled: { newEngine.isCancelled },
+                    onProgress: { copied, total in
+                        let fraction = total > 0 ? Double(copied) / Double(total) : 0
+                        Task { @MainActor [weak self] in
+                            self?.progressFraction = fraction * 0.12
+                            self?.progressStage = "Copying \(name)… \(Int(fraction * 100))%"
+                        }
+                    })
+                guard !Task.isCancelled, !newEngine.isCancelled else { throw CancellationError() }
+                self?.stagedInput = staged
+                let stagedSize = (try? FileManager.default.attributesOfItem(atPath: staged.path)[.size] as? Int64) ?? 0
+                self?.log.append("Staged a working copy (\(ByteFormat.string(stagedSize))).")
+                self?.progressStage = "Analysing…"
+
                 let result = try await newEngine.run(ipaURL: staged)
                 guard !Task.isCancelled else { return }
                 self?.workingRoot = result.extractionRoot
@@ -120,12 +121,15 @@ final class AnalysisSession: ObservableObject {
                 self?.progressFraction = 1
                 self?.log.append("Analysis complete: \(result.report.findings.count) findings, \(result.report.fileCount) files.")
                 self?.phase = .finished
+                self?.discardStagedInput()
             } catch is CancellationError {
                 self?.log.append("Cancelled. Temporary files were removed.")
                 self?.phase = .cancelled
+                self?.discardStagedInput()
             } catch {
                 self?.log.append("Analysis failed: \(error.localizedDescription)")
                 self?.phase = .failed(error.localizedDescription)
+                self?.discardStagedInput()
             }
         }
     }
@@ -139,7 +143,16 @@ final class AnalysisSession: ObservableObject {
             try? FileManager.default.removeItem(at: workingRoot)
             self.workingRoot = nil
         }
+        discardStagedInput()
         if isRunning { phase = .cancelled }
+    }
+
+    /// Removes the staged working copy of the IPA. Safe to call repeatedly.
+    private func discardStagedInput() {
+        if let stagedInput {
+            try? FileManager.default.removeItem(at: stagedInput.deletingLastPathComponent())
+            self.stagedInput = nil
+        }
     }
 
     func reset() {

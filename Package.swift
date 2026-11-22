@@ -25,7 +25,10 @@ let package = Package(
         ),
         .testTarget(
             name: "IPAKitTests",
-            dependencies: ["IPAKit"],
+            dependencies: [
+                "IPAKit",
+                .product(name: "ZIPFoundation", package: "ZIPFoundation"),
+            ],
             path: "Tests/IPAKitTests"
         ),
     ]

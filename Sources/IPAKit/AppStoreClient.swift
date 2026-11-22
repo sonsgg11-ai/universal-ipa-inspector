@@ -58,7 +58,7 @@ enum AppStoreClient {
 
         let source = "iTunes Lookup API (\(country.uppercased()))"
         var report = Report(source: "App Store", name: app["trackName"] as? String ?? id)
-        let fields: [(String, String)] = [
+        var fields: [(String, String)] = [
             ("trackName", "Name"),
             ("bundleId", "Bundle ID"),
             ("trackId", "App Store ID"),
@@ -73,14 +73,20 @@ enum AppStoreClient {
             ("userRatingCount", "Rating count"),
             ("formattedPrice", "Price"),
             ("contentAdvisoryRating", "Age rating"),
-            ("fileSizeBytes", "Download size (bytes)"),
+            ("fileSizeBytes", "Download size"),
             ("releaseNotes", "Release notes"),
+            ("sellerUrl", "Developer website"),
+            ("privacyPolicyUrl", "Privacy policy"),
+            ("trackViewUrl", "Store page"),
+            ("artistId", "Developer (artist) ID"),
+            ("userRatingCountForCurrentVersion", "Rating count (current version)"),
         ]
         for (key, title) in fields {
             if let value = app[key] {
                 report.findings.append(Finding(
                     category: "App Store", title: title,
-                    value: NativePlist.describe(value), source: source, status: .verified))
+                    value: AppStoreClient.humanisedValue(key, value),
+                    source: source, status: .verified))
             }
         }
         if let languages = app["languageCodesISO2A"] as? [String] {
@@ -88,10 +94,22 @@ enum AppStoreClient {
                 category: "App Store", title: "Languages",
                 value: languages.joined(separator: ", "), source: source, status: .verified))
         }
+        if let genres = app["genres"] as? [String], !genres.isEmpty {
+            report.findings.append(Finding(
+                category: "App Store", title: "Genres",
+                value: genres.joined(separator: ", "), source: source, status: .verified))
+        }
         if let devices = app["supportedDevices"] as? [String] {
             report.findings.append(Finding(
                 category: "App Store", title: "Supported devices",
                 value: "\(devices.count) models", source: source, status: .verified))
+        }
+        if let description = app["description"] as? String {
+            let trimmed = description.trimmingCharacters(in: .whitespacesAndNewlines)
+            let shortened = trimmed.count > 800 ? String(trimmed.prefix(800)) + "…" : trimmed
+            report.findings.append(Finding(
+                category: "App Store", title: "Store description",
+                value: shortened, source: source, status: .verified))
         }
         for title in ["Binary / Mach-O analysis", "Frameworks & SDKs", "Entitlements",
                       "Embedded URLs & endpoints", "Resources & assets"] {
@@ -103,6 +121,24 @@ enum AppStoreClient {
         return report
     }
 
+    /// Formats listing values for humans: byte counts become MB/GB, numbers
+    /// lose their fractional noise, everything else passes through unchanged.
+    static func humanisedValue(_ key: String, _ value: Any) -> String {
+        if key == "fileSizeBytes" {
+            let bytes: Int64?
+            if let n = value as? Int { bytes = Int64(n) }
+            else if let n = value as? Double { bytes = Int64(n) }
+            else { bytes = (value as? NSString)?.longLongValue }
+            if let bytes { return ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file) }
+        }
+        if let number = value as? Int { return String(number) }
+        if let number = value as? Double {
+            if number == number.rounded() && abs(number) < 1e15 { return String(Int(number)) }
+            return String(format: "%g", number)
+        }
+        return NativePlist.describe(value)
+    }
+
     enum StoreError: LocalizedError {
         case badLink
         case noResult(id: String, country: String)
@@ -112,7 +148,7 @@ enum AppStoreClient {
             case .badLink:
                 return "Could not find an App Store ID in that link."
             case .noResult(let id, let country):
-                return "No app found for ID \(id) in storefront \(country.uppercased())."
+                return "No app found for ID \(id) in storefront \(country.uppercased()). Some apps are not listed in every storefront — try switching the storefront picker (for example to the developer's home country), or paste the full App Store link including the id number."
             }
         }
     }

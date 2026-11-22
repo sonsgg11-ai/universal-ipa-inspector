@@ -131,7 +131,8 @@ final class IPAAnalyzer {
             try checkCancellation(isCancelled)
 
             progress("Extracting \(plan.accepted.count) files…")
-            let result = try extract(plan: plan, archive: ipaURL, into: workRoot, isCancelled: isCancelled)
+            let result = try extract(plan: plan, archive: ipaURL, into: workRoot,
+                                     progress: progress, isCancelled: isCancelled)
             extraction = result
 
             analysis.files = result.files
@@ -212,6 +213,7 @@ final class IPAAnalyzer {
     private func extract(plan: ZipArchive.ExtractionPlan,
                          archive: URL,
                          into root: URL,
+                         progress: (String) -> Void,
                          isCancelled: () -> Bool) throws -> ExtractionResult {
 
         let handle = try FileHandle(forReadingFrom: archive)
@@ -223,6 +225,7 @@ final class IPAAnalyzer {
         var layoutPath: String?
 
         let bufferSize = 1 << 20
+        let extractor = DeflateExtractor(archiveURL: archive)
 
         for entry in plan.accepted {
             try checkCancellation(isCancelled)
@@ -240,35 +243,38 @@ final class IPAAnalyzer {
             try fileManager.createDirectory(at: destination.deletingLastPathComponent(),
                                             withIntermediateDirectories: true)
 
-            // Raw stored bytes when the entry is uncompressed, so a huge IPA of
-            // already-compressed assets never inflates in memory.
-            let payload: Data
             do {
-                payload = try ZipArchive.rawData(at: archive, entry: entry,
-                                                 maxBytes: policy.maxEntryUncompressed)
-            } catch {
-                warnings.append("Could not read \(relative): \(error.localizedDescription)")
-                continue
-            }
-
-            if entry.compressionMethod == 0 {
-                try payload.write(to: destination, options: .atomic)
-            } else {
-                // Deflate path. ZIPFoundation handles stored and deflated
-                // entries; we re-read the entry through it for correctness,
-                // streamed to disk rather than into memory.
-                if let extracted = try? extractWithZipFoundation(archive: archive,
-                                                                 entryPath: relative,
-                                                                 to: destination,
-                                                                 bufferSize: bufferSize) {
-                    guard extracted else {
-                        warnings.append("Could not decompress \(relative)")
+                if entry.compressionMethod == 0 {
+                    // Stored entry: stream the bytes straight to disk in fixed
+                    // chunks. A multi-gigabyte entry never enters memory.
+                    let written = try writeStoredEntry(entry,
+                                                       archive: archive,
+                                                       to: destination,
+                                                       bufferSize: bufferSize,
+                                                       maxBytes: policy.maxEntryUncompressed)
+                    verifyWrittenSize(entry: entry, written: written, relative: relative, warnings: &warnings)
+                } else if extractor.isAvailable {
+                    // Deflated entry: ZIPFoundation decompresses chunk by chunk
+                    // into a pre-created file handle. Never buffered whole.
+                    let written = try extractor.stream(entry: entry, to: destination, bufferSize: bufferSize)
+                    guard let written else {
+                        warnings.append("Could not decompress \(relative): the entry could not be located for streaming decompression.")
                         continue
                     }
+                    if written == 0, entry.uncompressedSize > 0 {
+                        try? fileManager.removeItem(at: destination)
+                        warnings.append("Could not decompress \(relative): the deflate stream produced no data.")
+                        continue
+                    }
+                    verifyWrittenSize(entry: entry, written: written, relative: relative, warnings: &warnings)
                 } else {
                     warnings.append("Skipped \(relative): decompression is unavailable for method \(entry.compressionMethod).")
                     continue
                 }
+            } catch {
+                try? fileManager.removeItem(at: destination)
+                warnings.append("Could not read \(relative): \(error.localizedDescription)")
+                continue
             }
 
             let onDisk = (try? fileManager.attributesOfItem(atPath: destination.path)[.size] as? Int64) ?? 0
@@ -276,6 +282,10 @@ final class IPAAnalyzer {
 
             let role = BundleLayout.role(for: relative)
             files.append(FileEntry(path: relative, size: onDisk ?? 0, kind: role.rawValue))
+
+            if files.count % 200 == 0, !plan.accepted.isEmpty {
+                progress("Extracted \(files.count)/\(plan.accepted.count) files…")
+            }
 
             if relative.hasSuffix(".app/") == false, relative.contains("Payload/"),
                relative.hasSuffix(".app") || relative.contains(".app/") {
@@ -331,26 +341,45 @@ final class IPAAnalyzer {
                                 hash: nil, warnings: warnings)
     }
 
-    /// Streams a deflated entry to disk through ZIPFoundation's `extract`.
-    /// Returns nil when ZIPFoundation is unavailable or the entry is absent.
-    private func extractWithZipFoundation(archive: URL,
-                                          entryPath: String,
-                                          to destination: URL,
-                                          bufferSize: Int) throws -> Bool? {
-        #if canImport(ZIPFoundation)
-        guard let zip = try? Archive(url: archive, accessMode: .read) else { return nil }
-        guard let entry = zip[entryPath] else { return true }
+    /// Streams a stored (uncompressed) entry to disk in fixed chunks. The
+    /// destination file is created before the handle opens, and a partial
+    /// write is removed again on error, so a failure never leaves a silently
+    /// truncated file behind.
+    private func writeStoredEntry(_ entry: ZipArchive.Entry,
+                                  archive: URL,
+                                  to destination: URL,
+                                  bufferSize: Int,
+                                  maxBytes: Int64) throws -> Int64 {
+        fileManager.createFile(atPath: destination.path, contents: nil, attributes: nil)
+        let out = try FileHandle(forWritingTo: destination)
+        var written: Int64 = 0
         do {
-            _ = try zip.extract(entry, consumer: { chunk in
-                try? (try? FileHandle(forWritingTo: destination))?.write(contentsOf: chunk)
-            })
-            return true
+            written = try ZipArchive.streamRawData(at: archive,
+                                                   entry: entry,
+                                                   chunkSize: bufferSize,
+                                                   maxBytes: maxBytes) { chunk in
+                try out.write(contentsOf: chunk)
+            }
         } catch {
-            return false
+            try? out.close()
+            try? fileManager.removeItem(at: destination)
+            throw error
         }
-        #else
-        return nil
-        #endif
+        try? out.close()
+        return written
+    }
+
+    /// Detects silent truncation: when the bytes actually written do not
+    /// match the central directory's uncompressed size, the entry is corrupt
+    /// or misdescribed. Never fatal — recorded as a warning the report shows.
+    private func verifyWrittenSize(entry: ZipArchive.Entry,
+                                   written: Int64,
+                                   relative: String,
+                                   warnings: inout [String]) {
+        guard entry.compressionMethod == 0, entry.uncompressedSize > 0, written != entry.uncompressedSize else {
+            return
+        }
+        warnings.append("Size mismatch for \(relative): wrote \(written) bytes, the archive header declares \(entry.uncompressedSize).")
     }
 
     private var standardLimitations: [String] {
