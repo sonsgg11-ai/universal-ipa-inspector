@@ -166,8 +166,8 @@ final class LargeFileStagingTests: XCTestCase {
 
         // The expansion plan never exceeds the analyzer's extraction policy.
         let huge = IPAStager.requiredCapacity(compressedSize: 900 * 1024 * 1024 * 1024)
-        XCTAssertEqual(huge, Int64(900 * 1024 * 1024) * 1024 * 1024 * 1024
-            + 4 * 1024 * 1024 * 1024 + 256 * 1024 * 1024)
+        XCTAssertEqual(huge, 966_367_641_600 + 4_294_967_296 + 268_435_456,
+                       "900 GiB compressed: copy + capped expansion + margin")
 
         // Monotonic: a bigger IPA never needs less storage.
         XCTAssertGreaterThanOrEqual(
