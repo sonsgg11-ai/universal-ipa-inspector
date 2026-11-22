@@ -22,9 +22,10 @@ struct DeflateExtractor {
     }
     private let backing: Backing
 
-    /// Scans the archive's central directory once. `nil` when the archive
-    /// cannot be opened or ZIPFoundation is unavailable in this build.
-    init?(archiveURL: URL) {
+    /// Scans the archive's central directory once. When the archive cannot be
+    /// opened or ZIPFoundation is unavailable in this build, the extractor
+    /// reports `isAvailable == false` instead of failing the whole import.
+    init(archiveURL: URL) {
         #if canImport(ZIPFoundation)
         if let archive = try? Archive(url: archiveURL, accessMode: .read) {
             var map: [String: Entry] = [:]

@@ -109,7 +109,7 @@ final class LargeFileStagingTests: XCTestCase {
         ]).write(to: storedZip)
 
         let extractor = DeflateExtractor(archiveURL: storedZip)
-        XCTAssertNotNil(extractor)
+        XCTAssertTrue(extractor.isAvailable, "a well-formed archive must yield a usable deflate index")
         let entry = ZipArchive.Entry(path: "Payload/Sample.app/does-not-exist",
                                      contents: Data("ghost".utf8))
         let written = try extractor.stream(entry: entry, to: tempDirectory.appendingPathComponent("ghost.bin"))
