@@ -308,7 +308,9 @@ enum FixtureBuilder {
         superblob += be(UInt32(12 + 8 + blob.count))
         superblob += be(1)                                 // one index entry
         superblob += be(0xFADE_7171)                       // slot type
-        superblob += be(28)                                // 12 + 2 * 8
+        // One index entry of 8 bytes after the 12-byte header, so the blob
+        // payload starts at offset 20 — the entry must point exactly there.
+        superblob += be(UInt32(12 + 8))
         superblob += blob
         return superblob
     }
