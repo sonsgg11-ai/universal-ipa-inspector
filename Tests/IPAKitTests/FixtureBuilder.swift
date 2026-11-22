@@ -239,10 +239,12 @@ enum FixtureBuilder {
             commands.append(c)
         }
 
-        // LC_CODE_SIGNATURE (offset and size patched once the blob size is known)
+        // LC_CODE_SIGNATURE. linkedit_data_command is 16 bytes:
+        // cmd, cmdsize, dataoff, datasize — dataoff/datasize are patched once
+        // the SuperBlob layout is known.
         var signatureCommand: Data?
         if spec.entitlementsXML != nil {
-            signatureCommand = word(0x1D) + word(8) + word(0) + word(0)
+            signatureCommand = word(0x1D) + word(16) + word(0) + word(0)
         }
 
         if spec.corruptCommandSize {
@@ -276,8 +278,8 @@ enum FixtureBuilder {
 
         if let xml = spec.entitlementsXML, let signatureCommand {
             let blob = codeSignatureSuperBlob(entitlementsXML: xml)
-            // The SuperBlob sits directly after the 8-byte LC_CODE_SIGNATURE.
-            let dataOffset = out.count + 8
+            // The SuperBlob sits directly after the 16-byte LC_CODE_SIGNATURE.
+            let dataOffset = out.count + 16
             var patched = signatureCommand
             patched.replaceSubrange(8..<12, with: big
                 ? withUnsafeBytes(of: UInt32(dataOffset).bigEndian) { Data($0) }
