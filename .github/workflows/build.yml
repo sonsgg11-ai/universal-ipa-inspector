@@ -1,0 +1,319 @@
+name: Build IPA
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      sign:
+        description: "Produce a signed IPA (requires signing secrets)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SCHEME: IPAInspector
+  BUNDLE_ID: com.yourname.ipainspector
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Logic tests. These run on Linux and cover everything that is not UIKit
+  #    or SwiftUI: Mach-O parsing, ZIP safety, URL parsing, redaction, the
+  #    report model and the diff. Fast, and they fail the build honestly.
+  # ---------------------------------------------------------------------------
+  logic-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Swift toolchain
+        uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: "6.0.1"
+
+      - name: Show Swift version
+        run: swift --version
+
+      - name: Build the package
+        run: |
+          set -o pipefail
+          swift build --build-tests 2>&1 | tee build-package.log
+
+      - name: Run tests
+        run: |
+          set -o pipefail
+          swift test --parallel 2>&1 | tee test-package.log
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logic-test-logs
+          path: |
+            build-package.log
+            test-package.log
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # 2. Enumerate what this runner actually offers, rather than assuming an
+  #    Xcode version exists. The chosen path is written to a file the build
+  #    job reads, so the two jobs cannot disagree.
+  # ---------------------------------------------------------------------------
+  discover-toolchain:
+    runs-on: macos-15
+    outputs:
+      xcode_path: ${{ steps.pick.outputs.xcode_path }}
+      xcode_version: ${{ steps.pick.outputs.xcode_version }}
+    steps:
+      - name: List available Xcodes
+        run: |
+          echo "=== /Applications ==="
+          ls -1 /Applications | grep -i xcode || true
+          echo "=== xcode-select ==="
+          xcode-select -p || true
+          echo "=== default version ==="
+          xcodebuild -version || true
+          echo "=== SDKs ==="
+          xcodebuild -showsdks || true
+
+      - name: Pick newest Xcode present
+        id: pick
+        run: |
+          set -euo pipefail
+          CANDIDATES=$(ls -d /Applications/Xcode*.app 2>/dev/null || true)
+          if [ -z "$CANDIDATES" ]; then
+            echo "No Xcode installed on this runner image." >&2
+            exit 1
+          fi
+          # Sort by version numerically, newest last.
+          CHOSEN=$(printf '%s\n' $CANDIDATES | sed 's#.*/Xcode##; s#\.app##' | paste -d' ' - <(printf '%s\n' $CANDIDATES) \
+                   | sort -V | tail -1 | awk '{print $2}')
+          echo "Chosen: $CHOSEN"
+          VERSION=$("$CHOSEN/Contents/Developer/usr/bin/xcodebuild" -version | head -1 | awk '{print $2}')
+          echo "xcode_path=$CHOSEN" >> "$GITHUB_OUTPUT"
+          echo "xcode_version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------------
+  # 3. iOS build. Produces an unsigned IPA always, and a signed IPA when the
+  #    signing secrets are present and valid.
+  # ---------------------------------------------------------------------------
+  ios-build:
+    needs: discover-toolchain
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode ${{ needs.discover-toolchain.outputs.xcode_version }}
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s "${{ needs.discover-toolchain.outputs.xcode_path }}/Contents/Developer"
+          xcodebuild -version
+          xcodebuild -showsdks
+
+      - name: Install XcodeGen
+        run: |
+          set -euo pipefail
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          xcodegen --version
+
+      - name: Verify project.yml is valid
+        run: xcodegen dump --spec project.yml > generated-project.json || true
+
+      - name: Generate the Xcode project
+        run: xcodegen generate
+
+      - name: Build unsigned IPA
+        id: build
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project "$SCHEME.xcodeproj" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            build 2>&1 | tee build-ios.log
+
+      - name: Package the unsigned IPA
+        run: |
+          set -euo pipefail
+          APP="build/Build/Products/Release-iphoneos/$SCHEME.app"
+          test -d "$APP" || { echo "App bundle missing at $APP" >&2; exit 1; }
+          rm -rf Payload "$SCHEME-unsigned.ipa"
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry "$SCHEME-unsigned.ipa" Payload
+          ls -la "$SCHEME-unsigned.ipa"
+
+      - name: Validate the IPA structure
+        run: |
+          set -euo pipefail
+          IPA="$SCHEME-unsigned.ipa"
+          echo "--- zip integrity ---"
+          unzip -t "$IPA" | tail -3
+          echo "--- top-level entries ---"
+          unzip -Z1 "$IPA" | head -20
+          echo "--- required files ---"
+          unzip -Z1 "$IPA" | grep -q "^Payload/$SCHEME.app/Info.plist$" \
+            || { echo "Info.plist missing from the IPA" >&2; exit 1; }
+          EXEC=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" \
+                   "Payload/$SCHEME.app/Info.plist")
+          unzip -Z1 "$IPA" | grep -q "^Payload/$SCHEME.app/$EXEC$" \
+            || { echo "executable $EXEC missing from the IPA" >&2; exit 1; }
+          echo "--- Info.plist keys ---"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "Payload/$SCHEME.app/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" "Payload/$SCHEME.app/Info.plist"
+          echo "IPA structure is valid."
+
+      - name: Import signing identity
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.sign }}
+        env:
+          P12_BASE64: ${{ secrets.P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${P12_BASE64:-}" ]; then
+            echo "::error::sign=true was requested but P12_BASE64 is not configured."
+            exit 1
+          fi
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          security create-keychain -p ci "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p ci "$KEYCHAIN"
+          echo "$P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$P12_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: -s -k ci "$KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          echo "--- identities ---"
+          security find-identity -v -p codesigning "$KEYCHAIN"
+
+      - name: Sign and package
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.sign }}
+        env:
+          PROFILE_BASE64: ${{ secrets.PROFILE_BASE64 }}
+          EXPECTED_BUNDLE_ID: ${{ env.BUNDLE_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PROFILE_BASE64:-}" ]; then
+            echo "::error::sign=true was requested but PROFILE_BASE64 is not configured."
+            exit 1
+          fi
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          echo "$PROFILE_BASE64" | base64 --decode > "$RUNNER_TEMP/profile.mobileprovision"
+          security cms -D -i "$RUNNER_TEMP/profile.mobileprovision" > "$RUNNER_TEMP/profile.plist"
+
+          PROFILE_BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print :Entitlements:application-identifier" \
+                                "$RUNNER_TEMP/profile.plist" | sed 's/^[A-Z0-9]*\.//')
+          APP_BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" \
+                            "Payload/$SCHEME.app/Info.plist")
+          echo "Profile is for: $PROFILE_BUNDLE_ID"
+          echo "App bundle ID:  $APP_BUNDLE_ID"
+          if [ "$PROFILE_BUNDLE_ID" != "$APP_BUNDLE_ID" ]; then
+            echo "::error::Bundle ID mismatch. Set BUNDLE_ID in the workflow (and project.yml) to $PROFILE_BUNDLE_ID, or generate a matching profile."
+            exit 1
+          fi
+
+          /usr/libexec/PlistBuddy -x -c "Print :Entitlements" "$RUNNER_TEMP/profile.plist" \
+            > "$RUNNER_TEMP/entitlements.plist"
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN" \
+                     | grep -m1 "iPhone" | awk '{print $2}')
+          if [ -z "$IDENTITY" ]; then
+            echo "::error::No iPhone code-signing identity found in the keychain."
+            exit 1
+          fi
+
+          APP="Payload/$SCHEME.app"
+          cp "$RUNNER_TEMP/profile.mobileprovision" "$APP/embedded.mobileprovision"
+
+          # Sign nested code first, deepest first, as Apple requires.
+          if [ -d "$APP/Frameworks" ]; then
+            find "$APP/Frameworks" -type f \( -name "*.dylib" -o -perm -111 \) -print0 \
+              | xargs -0 -I{} codesign --force --timestamp=none --sign "$IDENTITY" {}
+            find "$APP/Frameworks" -type d -name "*.framework" -print0 \
+              | xargs -0 -I{} codesign --force --timestamp=none --sign "$IDENTITY" {}
+          fi
+          if [ -d "$APP/PlugIns" ]; then
+            find "$APP/PlugIns" -type d \( -name "*.appex" -o -name "*.app" \) -print0 \
+              | xargs -0 -I{} codesign --force --timestamp=none --sign "$IDENTITY" {}
+          fi
+          codesign --force --timestamp=none --sign "$IDENTITY" \
+            --entitlements "$RUNNER_TEMP/entitlements.plist" "$APP"
+
+          echo "--- verify ---"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          codesign -d --entitlements - "$APP" || true
+
+          rm -f "$SCHEME-signed.ipa"
+          zip -qry "$SCHEME-signed.ipa" Payload
+          unzip -t "$SCHEME-signed.ipa" | tail -2
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build-logs
+          path: |
+            build-ios.log
+            generated-project.json
+          if-no-files-found: warn
+
+      - name: Upload IPAs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: IPAInspector
+          path: |
+            IPAInspector-*.ipa
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # 4. Publish. The unsigned IPA becomes a GitHub Release asset, so it has a
+  #    permanent, directly downloadable URL — not just a workflow artifact.
+  # ---------------------------------------------------------------------------
+  release:
+    name: Publish GitHub Release
+    needs: [logic-tests, ios-build]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download the built IPA artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: IPAInspector
+          path: dist
+
+      - name: Create the release and attach the IPA
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ls -la dist
+          TAG="v0.1.${{ github.run_number }}"
+          SHA=$(sha256sum dist/IPAInspector-unsigned.ipa | awk '{print $1}')
+          gh release create "$TAG" dist/*.ipa \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "IPA Inspector - unsigned IPA (build ${{ github.run_number }})" \
+            --notes "Unsigned, unencrypted iOS IPA built from commit ${GITHUB_SHA::7}.
+
+            - Scheme: IPAInspector (SwiftUI, iOS 17+, bundle id com.yourname.ipainspector)
+            - Built with xcodebuild for generic iOS devices with code signing disabled
+            - Logic tests (Mach-O, ZIP safety, analyzer pipeline) passed before this build
+            - SHA-256 of IPAInspector-unsigned.ipa: ${SHA}
+            - Install by sideloading (AltStore, Sideloadly, TrollStore, or Xcode's Devices window). No Apple developer account is needed to build this IPA; it is unsigned."
+          echo "Release page: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${TAG}"
+          echo "Direct download: ${{ github.server_url }}/${{ github.repository }}/releases/download/${TAG}/IPAInspector-unsigned.ipa"
