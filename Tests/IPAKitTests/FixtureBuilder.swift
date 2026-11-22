@@ -228,11 +228,14 @@ enum FixtureBuilder {
             commands.append(c)
         }
 
-        // LC_ENCRYPTION_INFO(_64)
+        // LC_ENCRYPTION_INFO(_64). The struct is 20 bytes, but every load
+        // command must occupy a multiple of 8 bytes, so it is padded to 24 —
+        // exactly what the toolchain emits for real binaries.
         if let cryptID = spec.cryptID {
-            var c = word(is64 ? 0x2C : 0x21) + word(20)
+            var c = word(is64 ? 0x2C : 0x21) + word(24)
             c += word(0) + word(16)                        // cryptoff, cryptsize
             c += word(cryptID)
+            while c.count < 24 { c.append(0) }             // alignment padding
             commands.append(c)
         }
 
@@ -266,22 +269,23 @@ enum FixtureBuilder {
         out += word(UInt32(sizeofcmds))
         out += word(0)                                     // flags
         if is64 { out += word(0) }                         // reserved
-        for command in allCommands { out += command }
+        // Plain commands first; the code-signature command is written after
+        // the loop with its data offset and size patched in, so it appears
+        // exactly once.
+        for command in commands { out += command }
 
-        if let xml = spec.entitlementsXML {
+        if let xml = spec.entitlementsXML, let signatureCommand {
             let blob = codeSignatureSuperBlob(entitlementsXML: xml)
             // The SuperBlob sits directly after the 8-byte LC_CODE_SIGNATURE.
             let dataOffset = out.count + 8
-            if let signatureCommand {
-                var patched = signatureCommand
-                patched.replaceSubrange(8..<12, with: big
-                    ? withUnsafeBytes(of: UInt32(dataOffset).bigEndian) { Data($0) }
-                    : withUnsafeBytes(of: UInt32(dataOffset).littleEndian) { Data($0) })
-                patched.replaceSubrange(12..<16, with: big
-                    ? withUnsafeBytes(of: UInt32(blob.count).bigEndian) { Data($0) }
-                    : withUnsafeBytes(of: UInt32(blob.count).littleEndian) { Data($0) })
-                out += patched
-            }
+            var patched = signatureCommand
+            patched.replaceSubrange(8..<12, with: big
+                ? withUnsafeBytes(of: UInt32(dataOffset).bigEndian) { Data($0) }
+                : withUnsafeBytes(of: UInt32(dataOffset).littleEndian) { Data($0) })
+            patched.replaceSubrange(12..<16, with: big
+                ? withUnsafeBytes(of: UInt32(blob.count).bigEndian) { Data($0) }
+                : withUnsafeBytes(of: UInt32(blob.count).littleEndian) { Data($0) })
+            out += patched
             out += blob
         }
         return out

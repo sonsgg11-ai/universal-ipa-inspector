@@ -47,7 +47,10 @@ jobs:
       - name: Run tests
         run: |
           set -o pipefail
-          swift test --parallel 2>&1 | tee test-package.log
+          # Serial on purpose: one test asserts the analyzer leaves no working
+          # directories behind, which is only deterministic when no other test
+          # is running an analysis at the same moment.
+          swift test 2>&1 | tee test-package.log
 
       - name: Upload logs
         if: always()
@@ -177,6 +180,15 @@ jobs:
           echo "--- Info.plist keys ---"
           /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "Payload/$SCHEME.app/Info.plist"
           /usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" "Payload/$SCHEME.app/Info.plist"
+          echo "--- unsigned check ---"
+          if unzip -Z1 "$IPA" | grep -q "_CodeSignature"; then
+            echo "IPA must be unsigned but contains _CodeSignature" >&2; exit 1
+          fi
+          if unzip -Z1 "$IPA" | grep -q "embedded.mobileprovision"; then
+            echo "IPA must not contain a provisioning profile" >&2; exit 1
+          fi
+          test ! -e "Payload/$SCHEME.app/_CodeSignature" || { echo "app bundle is signed" >&2; exit 1; }
+          echo "IPA is unsigned as required."
           echo "IPA structure is valid."
 
       - name: Import signing identity
@@ -305,18 +317,22 @@ jobs:
         run: |
           set -euo pipefail
           ls -la dist
-          TAG="v0.1.${{ github.run_number }}"
+          TAG="unsigned-latest"
           SHA=$(sha256sum dist/IPAInspector-unsigned.ipa | awk '{print $1}')
+          # One rolling release: rebuild it from scratch on every successful
+          # build so the asset always matches the latest passing commit.
+          gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null || true
           gh release create "$TAG" dist/*.ipa \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
-            --title "IPA Inspector - unsigned IPA (build ${{ github.run_number }})" \
+            --title "IPA Inspector - unsigned IPA (latest passing build)" \
             --notes "Unsigned, unencrypted iOS IPA built from commit ${GITHUB_SHA::7}.
 
             - Scheme: IPAInspector (SwiftUI, iOS 17+, bundle id com.yourname.ipainspector)
             - Built with xcodebuild for generic iOS devices with code signing disabled
             - Logic tests (Mach-O, ZIP safety, analyzer pipeline) passed before this build
             - SHA-256 of IPAInspector-unsigned.ipa: ${SHA}
-            - Install by sideloading (AltStore, Sideloadly, TrollStore, or Xcode's Devices window). No Apple developer account is needed to build this IPA; it is unsigned."
+            - Install by sideloading (AltStore, Sideloadly, TrollStore, or Xcode's Devices window). No Apple developer account is needed to build this IPA; it is unsigned.
+            - Rebuilt automatically on every successful push to main."
           echo "Release page: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${TAG}"
           echo "Direct download: ${{ github.server_url }}/${{ github.repository }}/releases/download/${TAG}/IPAInspector-unsigned.ipa"
