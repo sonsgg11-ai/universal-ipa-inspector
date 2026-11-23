@@ -25,15 +25,19 @@ struct RootView: View {
             }
         }
         // Files → Share → “IPA Inspector”, “Open in IPA Inspector”, and
-        // AirDrop all arrive here. Without this handler the share sheet may
-        // list the app but handing a file over did nothing — which is exactly
-        // how a 230 MB IPA “never loads into the app”.
+        // AirDrop all arrive here.
         .onOpenURL { url in
             openError = nil
+            #if os(iOS) || os(macOS)
+            let accessed = url.startAccessingSecurityScopedResource()
+            #endif
             switch InputValidator.validate(url: url) {
             case .accepted(let name):
                 session.analyse(ipaURL: url, displayName: name)
             case .rejected(let message):
+                #if os(iOS) || os(macOS)
+                if accessed { url.stopAccessingSecurityScopedResource() }
+                #endif
                 openError = message
             }
         }
@@ -179,12 +183,16 @@ struct InputView: View {
             switch result {
             case .success(let urls):
                 guard let url = urls.first else { return }
-                // Content-based validation: a real ZIP container is accepted
-                // whatever its name, so nothing importable is refused here.
+                #if os(iOS) || os(macOS)
+                let accessed = url.startAccessingSecurityScopedResource()
+                #endif
                 switch InputValidator.validate(url: url) {
                 case .accepted(let name):
                     session.analyse(ipaURL: url, displayName: name)
                 case .rejected(let message):
+                    #if os(iOS) || os(macOS)
+                    if accessed { url.stopAccessingSecurityScopedResource() }
+                    #endif
                     importError = message
                 }
             case .failure(let error):
