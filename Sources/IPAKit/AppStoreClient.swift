@@ -18,47 +18,86 @@ enum AppStoreClient {
     ]
 
     /// Accepts "123456789", a full store URL, or a URL containing `id…`.
-    static func parse(_ input: String) -> (id: String, country: String)? {
-        let s = input.trimmingCharacters(in: .whitespaces)
-        if s.allSatisfy(\.isNumber), s.count >= 6 { return (s, "us") }
-        guard let regex = try? NSRegularExpression(pattern: #"id(\d{6,})"#),
-              let match = regex.firstMatch(in: s,
-                                          range: NSRange(location: 0, length: (s as NSString).length))
-        else { return nil }
-        let id = (s as NSString).substring(with: match.range(at: 1))
-        var country = "us"
-        if let url = URL(string: s), url.pathComponents.count > 1, url.pathComponents[1].count == 2 {
-            country = url.pathComponents[1].lowercased()
+    static func parse(_ input: String, defaultStorefront: String = "us") -> (id: String, country: String)? {
+        let s = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.allSatisfy(\.isNumber), s.count >= 6 {
+            return (s, defaultStorefront)
         }
-        return (id, country)
+
+        // Match id followed by digits
+        guard let regex = try? NSRegularExpression(pattern: #"(?:id)?(\d{6,})"#) else { return nil }
+        
+        var extractedCountry: String? = nil
+        var extractedId: String? = nil
+
+        // Try extracting country from URL path components (e.g. apps.apple.com/gb/app/...)
+        if let url = URL(string: s) {
+            let components = url.pathComponents.filter { $0 != "/" }
+            if let first = components.first?.lowercased(), first.count == 2 {
+                extractedCountry = first
+            }
+        }
+
+        // If s contains "id123456" explicitly
+        if let idRegex = try? NSRegularExpression(pattern: #"id(\d{6,})"#),
+           let match = idRegex.firstMatch(in: s, range: NSRange(location: 0, length: (s as NSString).length)) {
+            extractedId = (s as NSString).substring(with: match.range(at: 1))
+        } else if let match = regex.firstMatch(in: s, range: NSRange(location: 0, length: (s as NSString).length)) {
+            extractedId = (s as NSString).substring(with: match.range(at: 1))
+        }
+
+        guard let finalId = extractedId else { return nil }
+        let finalCountry = extractedCountry ?? defaultStorefront
+        return (finalId, finalCountry)
     }
 
     /// Fetches public listing metadata. Returns a Report with verified store
     /// fields and explicit "blocked" entries for everything that requires an
     /// IPA, so the distinction is visible in the UI.
     static func lookup(input: String, storefront: String = "us") async throws -> Report {
-        guard let (id, country) = parse(input) else {
+        guard let (id, parsedCountry) = parse(input, defaultStorefront: storefront) else {
             throw StoreError.badLink
         }
-        var components = URLComponents(string: "https://itunes.apple.com/lookup")!
-        components.queryItems = [
-            URLQueryItem(name: "id", value: id),
-            URLQueryItem(name: "country", value: country),
-            URLQueryItem(name: "entity", value: "software"),
-        ]
-        guard let url = components.url else { throw StoreError.badLink }
 
-        let (data, response) = try await URLSession.shared.data(from: url)
-        guard (response as? HTTPURLResponse)?.statusCode == 200,
-              let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let app = (json["results"] as? [[String: Any]])?.first
-        else {
-            throw StoreError.noResult(id: id, country: country)
+        // We try the country parsed from URL or selected storefront first.
+        // If not found, try fallback to "us" or the user storefront.
+        let countriesToTry = Array(Set([parsedCountry, storefront, "us"]))
+
+        var lastApp: [String: Any]? = nil
+        var successfulCountry: String = parsedCountry
+
+        for country in countriesToTry {
+            var components = URLComponents(string: "https://itunes.apple.com/lookup")!
+            components.queryItems = [
+                URLQueryItem(name: "id", value: id),
+                URLQueryItem(name: "country", value: country),
+                URLQueryItem(name: "entity", value: "software"),
+            ]
+            guard let url = components.url else { continue }
+
+            do {
+                let (data, response) = try await URLSession.shared.data(from: url)
+                if (response as? HTTPURLResponse)?.statusCode == 200,
+                   let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let results = json["results"] as? [[String: Any]],
+                   let app = results.first {
+                    lastApp = app
+                    successfulCountry = country
+                    break
+                }
+            } catch {
+                continue
+            }
         }
 
+        guard let app = lastApp else {
+            throw StoreError.noResult(id: id, country: parsedCountry)
+        }
+
+        let country = successfulCountry
         let source = "iTunes Lookup API (\(country.uppercased()))"
         var report = Report(source: "App Store", name: app["trackName"] as? String ?? id)
-        var fields: [(String, String)] = [
+        let fields: [(String, String)] = [
             ("trackName", "Name"),
             ("bundleId", "Bundle ID"),
             ("trackId", "App Store ID"),
